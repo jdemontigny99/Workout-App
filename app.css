@@ -171,11 +171,26 @@ button, [data-action] {
 }
 
 /* ─── Day Cards (Week View) ──────────────────────────────────────────────────── */
+.day-row {
+  display: flex;
+  align-items: stretch;
+  position: relative;
+}
+.day-row + .day-row::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 16px; right: 0;
+  height: 1px;
+  background: var(--separator);
+  pointer-events: none;
+}
+
 .day-card {
   display: flex;
   align-items: center;
-  width: 100%;
-  padding: 14px 16px;
+  flex: 1;
+  min-width: 0;
+  padding: 14px 0 14px 16px;
   background: none;
   border: none;
   cursor: pointer;
@@ -187,12 +202,43 @@ button, [data-action] {
 .day-card:active { background: rgba(0,0,0,0.04); }
 [data-theme="dark"] .day-card:active { background: rgba(255,255,255,0.06); }
 
-.day-card + .day-card::before {
-  content: '';
-  position: absolute;
-  top: 0; left: 16px; right: 0;
-  height: 1px;
-  background: var(--separator);
+.day-options-btn {
+  flex-shrink: 0;
+  width: 52px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-tertiary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s;
+}
+.day-options-btn:active { color: var(--accent); }
+
+/* ─── Add Training Day Button ─────────────────────────────────────────────── */
+.add-day-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  padding: 14px 16px;
+  margin-top: 12px;
+  background: none;
+  border: 1.5px dashed var(--border);
+  border-radius: var(--radius);
+  color: var(--accent);
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+  font-family: inherit;
+  min-height: 44px;
+  transition: background 0.12s, border-color 0.12s;
+}
+.add-day-btn:active {
+  background: rgba(0,122,255,0.06);
+  border-color: var(--accent);
 }
 
 .day-card-left { flex: 1; min-width: 0; }
@@ -230,6 +276,40 @@ button, [data-action] {
 .day-count  { font-size: 14px; color: var(--text-secondary); }
 .day-pct    { font-size: 14px; font-weight: 500; min-width: 38px; text-align: right; }
 .day-chevron { color: var(--text-tertiary); flex-shrink: 0; }
+.day-empty-hint { font-size: 13px; color: var(--text-tertiary); font-style: italic; }
+
+/* ─── Weekly Summary ──────────────────────────────────────────────────────────── */
+.week-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 6px 14px;
+}
+.week-summary-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.week-summary-track {
+  flex: 1;
+  height: 5px;
+  border-radius: 99px;
+  background: var(--progress-track);
+  overflow: hidden;
+}
+.week-summary-fill {
+  height: 100%;
+  border-radius: 99px;
+  background: var(--accent);
+  transition: width 0.4s ease;
+}
+.week-summary-stat {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
 
 /* ─── Reset All ───────────────────────────────────────────────────────────────── */
 .reset-all-wrap {
@@ -287,7 +367,7 @@ button, [data-action] {
 .workout-item + .workout-item::before {
   content: '';
   position: absolute;
-  top: 0; left: 52px; right: 0;
+  top: 0; left: 16px; right: 0;
   height: 1px;
   background: var(--separator);
 }
@@ -714,14 +794,68 @@ button, [data-action] {
   background: rgba(0,0,0,0.05);
 }
 
-/* ─── Edit Button ──────────────────────────────────────────────────────────────── */
-.workout-actions {
-  display: flex;
-  align-items: flex-start;
-  gap: 2px;
+/* ─── Drag Handle ────────────────────────────────────────────────────────────── */
+.drag-handle {
   flex-shrink: 0;
-  margin-top: 2px;
+  width: 32px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  cursor: grab;
+  color: var(--text-tertiary);
+  padding: 0;
+  margin-left: -6px;
+  touch-action: none; /* required for touch drag */
 }
+.drag-handle:active { cursor: grabbing; color: var(--text-secondary); }
+
+/* Drag states */
+.drag-src { opacity: 0.35; }
+.drag-over-above { box-shadow: 0 -2px 0 0 var(--accent) inset; }
+.drag-over-below { box-shadow: 0  2px 0 0 var(--accent) inset; }
+
+.drag-ghost {
+  position: fixed;
+  z-index: 500;
+  pointer-events: none;
+  background: var(--surface);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 28px rgba(0,0,0,0.22);
+  transform: scale(1.025);
+  opacity: 0.97;
+  overflow: hidden;
+}
+
+/* ─── Workout More / Actions ─────────────────────────────────────────────────── */
+.workout-more-btn {
+  flex-shrink: 0;
+  width: 36px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-tertiary);
+  padding: 0;
+  transition: color 0.15s;
+  margin: -2px 0;
+}
+.workout-more-btn:active { color: var(--text); }
+
+/* Actions hidden by default, revealed on expand */
+.workout-actions {
+  display: none;
+  align-items: flex-start;
+  gap: 0;
+  flex-shrink: 0;
+}
+.workout-item.expanded .workout-more-btn { display: none; }
+.workout-item.expanded .workout-actions  { display: flex; }
 
 .edit-btn {
   background: none;
@@ -734,10 +868,79 @@ button, [data-action] {
   display: flex;
   align-items: center;
   justify-content: center;
-  opacity: 0.75;
+  opacity: 0.8;
   transition: opacity 0.15s;
 }
 .edit-btn:active { opacity: 1; }
+
+/* ─── Completion Flash Animation ─────────────────────────────────────────────── */
+@keyframes workout-complete {
+  0%   { background: transparent; }
+  25%  { background: rgba(52,199,89,0.16); }
+  100% { background: transparent; }
+}
+.workout-item.just-completed {
+  animation: workout-complete 0.7s ease forwards;
+}
+
+/* ─── Floating Action Button ─────────────────────────────────────────────────── */
+.fab {
+  position: fixed;
+  right: max(20px, env(safe-area-inset-right, 20px));
+  bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+  width: 58px;
+  height: 58px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 4px 16px rgba(0,122,255,0.45), 0 1px 4px rgba(0,0,0,0.12);
+  z-index: 50;
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+.fab:active {
+  transform: scale(0.92);
+  box-shadow: 0 2px 8px rgba(0,122,255,0.35);
+}
+
+/* Extra bottom padding so last workout isn't hidden behind FAB */
+.day-view .content {
+  padding-bottom: calc(96px + env(safe-area-inset-bottom, 0px));
+}
+
+/* ─── Timer Pill (collapsed) ─────────────────────────────────────────────────── */
+.timer-pill {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 13px 16px;
+  margin-bottom: 10px;
+  background: var(--surface);
+  border: none;
+  border-radius: var(--radius);
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 14px;
+  font-weight: 500;
+  font-family: inherit;
+  box-shadow: var(--shadow);
+  text-align: left;
+  transition: opacity 0.15s;
+}
+.timer-pill:active { opacity: 0.7; }
+
+.timer-pill-label { flex: 1; }
+
+.timer-pill-chevron {
+  color: var(--text-tertiary);
+  display: flex;
+  align-items: center;
+}
 
 /* ─── Timer Card ───────────────────────────────────────────────────────────────── */
 .timer-card {
@@ -779,14 +982,32 @@ button, [data-action] {
 
 .timer-left { flex: 1; min-width: 0; }
 
+.timer-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.timer-collapse-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-tertiary);
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  transition: background 0.12s;
+}
+.timer-collapse-btn:active { background: rgba(0,0,0,0.08); }
+
 .timer-label {
   font-size: 11px;
   font-weight: 700;
   color: var(--text-tertiary);
   letter-spacing: 0.8px;
   text-transform: uppercase;
-  display: block;
-  margin-bottom: 8px;
 }
 
 .timer-preset-row {
@@ -985,6 +1206,185 @@ button, [data-action] {
   pointer-events: none;
   transition: width 0.05s;
 }
+
+/* ─── Streak Badge ─────────────────────────────────────────────────────────────── */
+.streak-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--orange);
+  background: rgba(255,149,0,0.12);
+  padding: 3px 9px;
+  border-radius: 99px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+[data-theme="dark"] .streak-badge {
+  background: rgba(255,149,0,0.18);
+}
+
+/* ─── Set / Rep Logging ────────────────────────────────────────────────────────── */
+
+/* Hidden by default; shown when workout item is expanded */
+.workout-log {
+  display: none;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--separator);
+}
+.workout-item.expanded .workout-log {
+  display: flex;
+}
+
+/* Last-session reference line */
+.log-last-session {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  font-style: italic;
+  padding: 0 2px;
+}
+
+/* List of logged sets */
+.log-sets-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.log-set-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--surface2);
+  border-radius: 8px;
+}
+
+.log-set-badge {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  min-width: 36px;
+}
+
+.log-set-detail {
+  flex: 1;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.log-set-remove {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-tertiary);
+  font-size: 13px;
+  padding: 4px 6px;
+  min-width: 30px;
+  min-height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  flex-shrink: 0;
+  transition: color 0.12s, background 0.12s;
+}
+.log-set-remove:active {
+  color: var(--red);
+  background: rgba(255,59,48,0.1);
+}
+
+/* Add-set input row */
+.log-add-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.log-input {
+  padding: 8px 10px;
+  background: var(--surface2);
+  border: 1.5px solid var(--border);
+  border-radius: 8px;
+  font-size: 15px;
+  font-family: inherit;
+  color: var(--text);
+  outline: none;
+  -webkit-appearance: none;
+  text-align: center;
+  transition: border-color 0.15s;
+}
+.log-input:focus {
+  border-color: var(--accent);
+}
+.log-input::placeholder {
+  color: var(--text-tertiary);
+}
+
+.log-weight {
+  width: 72px;
+  flex-shrink: 0;
+}
+
+.log-reps {
+  width: 58px;
+  flex-shrink: 0;
+}
+
+.log-unit-btn {
+  padding: 8px 10px;
+  min-height: 38px;
+  background: var(--surface2);
+  border: 1.5px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: border-color 0.15s, color 0.15s;
+}
+.log-unit-btn:active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.log-sep {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.log-add-btn {
+  flex: 1;
+  padding: 8px 12px;
+  min-height: 38px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: opacity 0.15s;
+}
+.log-add-btn:active { opacity: 0.8; }
 
 /* ─── Confirm Dialog (native) ─────────────────────────────────────────────────── */
 

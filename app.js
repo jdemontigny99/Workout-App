@@ -1,39 +1,37 @@
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const WORKOUT_DAYS = ['Monday', 'Wednesday', 'Thursday', 'Friday'];
-
-const SHEET_URL = 'https://gsx2json.com/api?id=19HocMTEu0Sf1QTj-bRzA84o9sTUaSyKg8hIry8AT1L8&sheet=Sheet1';
+const DEFAULT_DAYS = ['Monday', 'Wednesday', 'Thursday', 'Friday'];
 
 const KEYS = {
   completed: 'wt_completedIDs',
-  edits:     'wt_customEdits',
+  workouts:  'wt_workouts',
+  days:      'wt_days',
   dark:      'wt_isDarkMode',
-  cache:     'wt_sheetCache',
   history:   'wt_weekHistory',
+  logs:      'wt_logs',
+  unit:      'wt_unit',
 };
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
 const state = {
-  sheetData:      [],
+  days:           [...DEFAULT_DAYS],
+  workouts:       {},
   completedIDs:   new Set(),
-  customEdits:    {},
   isDarkMode:     false,
-  isLoading:      false,
-  errorMessage:   null,
   view:           'week',
   currentDay:     null,
-  showModal:      false,   // false | 'add' | 'edit'
-  editTarget:     null,    // { day, index } in edit mode
+  showModal:      false,
+  editTarget:     null,
   filterCategory: null,
   showHistory:    false,
 };
 
-let pendingImg      = null;  // { dataURL } selected in modal, not yet saved
-let editCurrentImg  = null;  // dataURL of existing image when editing
-let editImgRemoved  = false; // user explicitly removed image in edit mode
+let pendingImg      = null;
+let editCurrentImg  = null;
+let editImgRemoved  = false;
 
-// ─── Timer (independent of render cycle) ─────────────────────────────────────
+// ─── Timer ────────────────────────────────────────────────────────────────────
 
 const timer = {
   preset:     60,
@@ -41,26 +39,44 @@ const timer = {
   initial:    60,
   running:    false,
   intervalId: null,
+  expanded:   false,
 };
 
-// ─── IndexedDB (Image Storage) ────────────────────────────────────────────────
+// ─── Wake Lock ────────────────────────────────────────────────────────────────
+
+let wakeLock = null;
+
+async function acquireWakeLock() {
+  if (!('wakeLock' in navigator)) return;
+  try {
+    wakeLock = await navigator.wakeLock.request('screen');
+    wakeLock.addEventListener('release', () => { wakeLock = null; });
+  } catch (_) {}
+}
+
+function releaseWakeLock() {
+  wakeLock?.release();
+  wakeLock = null;
+}
+
+// Re-acquire if page becomes visible while in day view
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && state.view === 'day') acquireWakeLock();
+});
+
+// ─── IndexedDB ────────────────────────────────────────────────────────────────
 
 let _db = null;
 
 function initDB() {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open('WorkoutTrackerDB', 1);
-    req.onupgradeneeded = e => {
-      e.target.result.createObjectStore('images', { keyPath: 'key' });
-    };
+    req.onupgradeneeded = e => e.target.result.createObjectStore('images', { keyPath: 'key' });
     req.onsuccess = e => { _db = e.target.result; resolve(); };
     req.onerror   = e => reject(e.target.error);
   });
 }
-
-function ensureDB() {
-  return _db ? Promise.resolve() : initDB();
-}
+function ensureDB() { return _db ? Promise.resolve() : initDB(); }
 
 async function saveImage(key, dataURL) {
   await ensureDB();
@@ -119,13 +135,11 @@ function compressImage(file, maxWidth = 1200, quality = 0.82) {
 function pickImage() {
   return new Promise(resolve => {
     const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = 'image/*';
+    input.type = 'file'; input.accept = 'image/*';
     input.onchange = async e => {
       const file = e.target.files[0];
       if (!file) { resolve(null); return; }
-      try { resolve(await compressImage(file)); }
-      catch { resolve(null); }
+      try { resolve(await compressImage(file)); } catch { resolve(null); }
     };
     input.oncancel = () => resolve(null);
     document.body.appendChild(input);
@@ -137,13 +151,7 @@ function pickImage() {
 function uuid() {
   if (crypto.randomUUID) return crypto.randomUUID();
   return ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
-    (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16)
-  );
-}
-
-function getImageKey(workout) {
-  if (workout._imgKey) return workout._imgKey;
-  return `sheet-${workout.Day}-${workout.Index}`;
+    (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16));
 }
 
 // ─── Persistence ──────────────────────────────────────────────────────────────
@@ -157,262 +165,381 @@ function loadState() {
   const comp = localStorage.getItem(KEYS.completed);
   state.completedIDs = comp ? new Set(JSON.parse(comp)) : new Set();
 
-  const edits = localStorage.getItem(KEYS.edits);
-  state.customEdits = edits ? JSON.parse(edits) : {};
+  const savedDays = localStorage.getItem(KEYS.days);
+  state.days = savedDays ? JSON.parse(savedDays) : [...DEFAULT_DAYS];
 
-  const cached = localStorage.getItem(KEYS.cache);
-  if (cached) { try { state.sheetData = JSON.parse(cached); } catch (_) {} }
+  const savedWorkouts = localStorage.getItem(KEYS.workouts);
+  if (savedWorkouts) {
+    try { state.workouts = JSON.parse(savedWorkouts); } catch { state.workouts = {}; }
+  }
+  state.days.forEach(d => { if (!state.workouts[d]) state.workouts[d] = []; });
 }
 
 function saveState() {
   localStorage.setItem(KEYS.completed, JSON.stringify([...state.completedIDs]));
-  localStorage.setItem(KEYS.edits,     JSON.stringify(state.customEdits));
+  localStorage.setItem(KEYS.days,      JSON.stringify(state.days));
+  localStorage.setItem(KEYS.workouts,  JSON.stringify(state.workouts));
   localStorage.setItem(KEYS.dark,      String(state.isDarkMode));
 }
 
-// ─── Week History ──────────────────────────────────────────────────────────────
+// ─── Set / Rep Logs ───────────────────────────────────────────────────────────
+
+function loadLogs() {
+  try { return JSON.parse(localStorage.getItem(KEYS.logs) || '{}'); } catch { return {}; }
+}
+function saveLogs(logs) { localStorage.setItem(KEYS.logs, JSON.stringify(logs)); }
+function getTodayKey()  { return new Date().toISOString().split('T')[0]; }
+
+function getWeightUnit() { return localStorage.getItem(KEYS.unit) || 'lbs'; }
+function setWeightUnit(u) { localStorage.setItem(KEYS.unit, u); }
+
+function getTodaySets(workoutId) {
+  return loadLogs()[getTodayKey()]?.[workoutId] || [];
+}
+
+function getLastSessionLog(workoutId) {
+  const logs  = loadLogs();
+  const today = getTodayKey();
+  for (const date of Object.keys(logs).sort().reverse()) {
+    if (date >= today) continue;
+    if (logs[date][workoutId]?.length > 0) return { date, sets: logs[date][workoutId] };
+  }
+  return null;
+}
+
+function logSet(workoutId, reps, weight, unit) {
+  const logs  = loadLogs();
+  const today = getTodayKey();
+  if (!logs[today])            logs[today] = {};
+  if (!logs[today][workoutId]) logs[today][workoutId] = [];
+  logs[today][workoutId].push({ reps, weight, unit });
+  saveLogs(logs);
+  return logs[today][workoutId];
+}
+
+function removeSet(workoutId, setIndex) {
+  const logs  = loadLogs();
+  const today = getTodayKey();
+  if (!logs[today]?.[workoutId]) return [];
+  logs[today][workoutId].splice(setIndex, 1);
+  saveLogs(logs);
+  return logs[today][workoutId];
+}
+
+function formatSet(s) {
+  const w = s.weight > 0 ? `${s.weight}${s.unit} × ` : '';
+  return `${w}${s.reps} rep${s.reps !== 1 ? 's' : ''}`;
+}
+
+function formatLastSession(last) {
+  if (!last || last.sets.length === 0) return null;
+  const d    = new Date(last.date + 'T00:00:00');
+  const label = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  const sets  = last.sets;
+  const first = sets[0];
+  const wPart = first.weight > 0 ? ` @ ${first.weight}${first.unit}` : '';
+  const summary = `${sets.length}×${first.reps}${wPart}`;
+  return `${summary} · ${label}`;
+}
+
+function renderSetsList(workoutId, sets) {
+  if (sets.length === 0) return '';
+  return sets.map((s, i) => `
+    <div class="log-set-row">
+      <span class="log-set-badge">Set ${i + 1}</span>
+      <span class="log-set-detail">${esc(formatSet(s))}</span>
+      <button class="log-set-remove" data-action="remove-set"
+              data-workout-id="${esc(workoutId)}" data-set-index="${i}">✕</button>
+    </div>`).join('');
+}
+
+function renderLogSection(workoutId) {
+  const todaySets  = getTodaySets(workoutId);
+  const lastSess   = getLastSessionLog(workoutId);
+  const lastLabel  = formatLastSession(lastSess);
+  const unit       = getWeightUnit();
+
+  return `
+    <div class="workout-log" id="workout-log-${esc(workoutId)}">
+      ${lastLabel ? `<div class="log-last-session">Last session: ${esc(lastLabel)}</div>` : ''}
+      <div class="log-sets-list" id="log-sets-${esc(workoutId)}">${renderSetsList(workoutId, todaySets)}</div>
+      <div class="log-add-row">
+        <input class="log-input log-weight" type="text" inputmode="decimal"
+               id="log-weight-${esc(workoutId)}" placeholder="Weight" autocomplete="off">
+        <button class="log-unit-btn" data-action="toggle-unit"
+                data-workout-id="${esc(workoutId)}" data-unit="${esc(unit)}">${esc(unit)}</button>
+        <span class="log-sep">×</span>
+        <input class="log-input log-reps" type="text" inputmode="numeric"
+               id="log-reps-${esc(workoutId)}" placeholder="Reps" autocomplete="off">
+        <button class="log-add-btn" data-action="log-set"
+                data-workout-id="${esc(workoutId)}">+ Set</button>
+      </div>
+    </div>`;
+}
+
+// ─── Week History ─────────────────────────────────────────────────────────────
 
 function getWeekKey(date = new Date()) {
-  const d = new Date(date);
+  const d   = new Date(date);
   const day = d.getDay();
-  const diff = d.getDate() - day + (day === 0 ? -6 : 1);
-  const monday = new Date(d.setDate(diff));
-  return monday.toISOString().split('T')[0]; // "YYYY-MM-DD" of that Monday
+  return new Date(d.setDate(d.getDate() - day + (day === 0 ? -6 : 1))).toISOString().split('T')[0];
+}
+
+function getPrevWeekKey(key) {
+  const d = new Date(key + 'T00:00:00');
+  d.setDate(d.getDate() - 7);
+  return d.toISOString().split('T')[0];
 }
 
 function loadWeekHistory() {
-  try { return JSON.parse(localStorage.getItem(KEYS.history) || '{}'); }
-  catch { return {}; }
+  try { return JSON.parse(localStorage.getItem(KEYS.history) || '{}'); } catch { return {}; }
 }
 
 function saveWeekSnapshot() {
   const history = loadWeekHistory();
   const key = getWeekKey();
   history[key] = {};
-  for (const day of WORKOUT_DAYS) {
-    const workouts = getDayData(day);
-    const done  = workouts.filter(w => state.completedIDs.has(workoutID(day, w.Index))).length;
-    history[key][day] = { done, total: workouts.length };
+  for (const day of state.days) {
+    const w = state.workouts[day] || [];
+    history[key][day] = { done: w.filter(x => state.completedIDs.has(x.id)).length, total: w.length };
   }
   localStorage.setItem(KEYS.history, JSON.stringify(history));
 }
 
 function weekKeyToLabel(key) {
-  // key is "YYYY-MM-DD" (the Monday of that week)
   const d = new Date(key + 'T00:00:00');
   return `Week of ${d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
 }
 
-// ─── Date Utilities ────────────────────────────────────────────────────────────
+function calculateStreak() {
+  const history   = loadWeekHistory();
+  const curWeek   = getWeekKey();
+  const sorted    = Object.keys(history).sort().reverse();
+  let streak = 0, lastCounted = null;
+
+  for (const key of sorted) {
+    if (key > curWeek) continue;
+    if (lastCounted !== null && key !== getPrevWeekKey(lastCounted)) break; // gap
+
+    const week      = history[key];
+    const totalDone = Object.values(week).reduce((s, d) => s + (d.done || 0), 0);
+
+    if (totalDone === 0) {
+      if (key === curWeek) continue; // current week in progress — don't break
+      break;
+    }
+    streak++;
+    lastCounted = key;
+  }
+  return streak;
+}
+
+// ─── Date Utilities ───────────────────────────────────────────────────────────
 
 function getTodayDayName() {
   return ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'][new Date().getDay()];
 }
 
-// ─── API Fetch ────────────────────────────────────────────────────────────────
-
-async function fetchSheetData() {
-  state.isLoading = true;
-  state.errorMessage = null;
-  render();
-
-  try {
-    const resp = await fetch(SHEET_URL);
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const json = await resp.json();
-
-    if (!json.rows || !Array.isArray(json.rows)) {
-      throw new Error("API response missing 'rows'.");
-    }
-
-    state.sheetData = json.rows.map((row, i) => ({
-      Day:      row.Day      || '',
-      Workout:  row.Workout  || '',
-      Category: row.Category || null,
-      Notes:    row.Notes    || null,
-      Index:    i,
-    }));
-
-    localStorage.setItem(KEYS.cache, JSON.stringify(state.sheetData));
-    state.errorMessage = null;
-  } catch (err) {
-    state.errorMessage = state.sheetData.length > 0
-      ? '⚠️ Could not refresh — showing cached data.'
-      : `⚠️ Failed to load workouts: ${err.message}`;
-  }
-
-  state.isLoading = false;
-  render();
-  if (state.view === 'day') loadDayImages(state.currentDay);
-}
-
 // ─── Data Logic ───────────────────────────────────────────────────────────────
 
-function getDayData(day) {
-  const fromSheet = state.sheetData.filter(r => r.Day === day);
-  const custom    = state.customEdits[day] ?? [];
-  const offset    = fromSheet.length;
-  return [...fromSheet, ...custom.map((row, i) => ({ ...row, Index: offset + i }))];
-}
-
-function workoutID(day, index) {
-  return `${day}-${index}`;
+function getAllCategories() {
+  const cats = new Set();
+  for (const day of state.days)
+    for (const w of (state.workouts[day] || []))
+      if (w.Category) cats.add(w.Category);
+  return [...cats].sort();
 }
 
 function getCategories(day) {
-  return [...new Set(getDayData(day).map(w => w.Category).filter(Boolean))];
+  return [...new Set((state.workouts[day] || []).map(w => w.Category).filter(Boolean))];
 }
 
 function toggleCompletion(id) {
-  state.completedIDs.has(id)
-    ? state.completedIDs.delete(id)
-    : state.completedIDs.add(id);
+  const wasCompleted = state.completedIDs.has(id);
+  wasCompleted ? state.completedIDs.delete(id) : state.completedIDs.add(id);
   saveState();
   saveWeekSnapshot();
-  render();
-  if (state.view === 'day') loadDayImages(state.currentDay);
+
+  const checkBtn = document.querySelector(`[data-action="toggle"][data-id="${CSS.escape(id)}"]`);
+  if (checkBtn) {
+    const nowDone = !wasCompleted;
+    checkBtn.innerHTML = nowDone ? ICONS.checked : ICONS.circle;
+    checkBtn.setAttribute('aria-label', nowDone ? 'Mark incomplete' : 'Mark complete');
+    const item = checkBtn.closest('.workout-item');
+    if (item) {
+      item.querySelector('.workout-name')?.classList.toggle('done', nowDone);
+      if (nowDone) {
+        item.classList.remove('just-completed');
+        void item.offsetWidth;
+        item.classList.add('just-completed');
+        setTimeout(() => item.classList.remove('just-completed'), 700);
+      }
+    }
+  } else {
+    render();
+    if (state.view === 'day') loadDayImages(state.currentDay);
+  }
 }
 
 function completeAll(day) {
-  getDayData(day).forEach(w => state.completedIDs.add(workoutID(day, w.Index)));
-  saveState();
-  saveWeekSnapshot();
-  render();
-  loadDayImages(day);
+  (state.workouts[day] || []).forEach(w => state.completedIDs.add(w.id));
+  saveState(); saveWeekSnapshot(); render(); loadDayImages(day);
 }
 
 function resetAll() {
   if (!confirm('Reset all progress?\n\nThis clears completion status for every day.')) return;
-  state.completedIDs.clear();
-  saveState();
-  saveWeekSnapshot();
-  render();
+  state.completedIDs.clear(); saveState(); saveWeekSnapshot(); render();
 }
 
 function resetDay(day) {
   if (!confirm(`Reset ${day}?\n\nThis clears completion for ${day} only.`)) return;
-  for (const id of [...state.completedIDs]) {
-    if (id.startsWith(`${day}-`)) state.completedIDs.delete(id);
-  }
-  saveState();
-  saveWeekSnapshot();
-  render();
-  loadDayImages(day);
+  (state.workouts[day] || []).forEach(w => state.completedIDs.delete(w.id));
+  saveState(); saveWeekSnapshot(); render(); loadDayImages(day);
 }
 
 function addWorkout(day, name, category, notes, imgKey) {
-  const newIndex = getDayData(day).length;
-  const row = {
-    Day:      day,
-    Workout:  name,
-    Category: category || null,
-    Notes:    notes    || null,
-    Index:    newIndex,
-    _custom:  true,
-    _imgKey:  imgKey || uuid(),
-  };
-  if (!state.customEdits[day]) state.customEdits[day] = [];
-  state.customEdits[day].push(row);
+  if (!state.workouts[day]) state.workouts[day] = [];
+  const id = uuid();
+  state.workouts[day].push({ id, Day: day, Workout: name, Category: category || null, Notes: notes || null, _imgKey: imgKey || id });
   saveState();
 }
 
-function editWorkout(day, index, name, category, notes) {
-  const originalsCount = state.sheetData.filter(r => r.Day === day).length;
-  const localIdx = index - originalsCount;
-  if (!state.customEdits[day]?.[localIdx]) return;
-  state.customEdits[day][localIdx] = {
-    ...state.customEdits[day][localIdx],
-    Workout:  name,
-    Category: category || null,
-    Notes:    notes    || null,
-  };
+function editWorkout(day, workoutId, name, category, notes) {
+  const idx = (state.workouts[day] || []).findIndex(w => w.id === workoutId);
+  if (idx === -1) return;
+  state.workouts[day][idx] = { ...state.workouts[day][idx], Workout: name, Category: category || null, Notes: notes || null };
   saveState();
 }
 
-async function deleteCustomWorkout(day, index) {
-  if (!state.customEdits[day]) return;
-  const localIdx = state.customEdits[day].findIndex(r => r.Index === index);
-  if (localIdx === -1) return;
-
-  const row = state.customEdits[day][localIdx];
+async function deleteWorkout(day, workoutId) {
+  const workouts = state.workouts[day];
+  if (!workouts) return;
+  const idx = workouts.findIndex(w => w.id === workoutId);
+  if (idx === -1) return;
+  const row = workouts[idx];
   if (row._imgKey) await deleteImage(row._imgKey);
+  workouts.splice(idx, 1);
+  state.completedIDs.delete(workoutId);
+  saveState(); render(); loadDayImages(day);
+}
 
-  state.customEdits[day].splice(localIdx, 1);
-  state.completedIDs.delete(workoutID(day, index));
+function addDay(name) {
+  const t = name.trim();
+  if (!t) return false;
+  if (state.days.map(d => d.toLowerCase()).includes(t.toLowerCase())) { alert(`"${t}" already exists.`); return false; }
+  state.days.push(t); state.workouts[t] = []; saveState(); return true;
+}
 
-  const originalsCount = state.sheetData.filter(r => r.Day === day).length;
-  state.customEdits[day] = state.customEdits[day].map((w, i) => {
-    const newIdx = originalsCount + i;
-    const oldID  = workoutID(day, w.Index);
-    const newID  = workoutID(day, newIdx);
-    if (state.completedIDs.has(oldID)) {
-      state.completedIDs.delete(oldID);
-      state.completedIDs.add(newID);
-    }
-    return { ...w, Index: newIdx };
-  });
+function renameDay(oldName, newName) {
+  const t = newName.trim();
+  if (!t || oldName === t) return false;
+  if (state.days.filter(d => d !== oldName).map(d => d.toLowerCase()).includes(t.toLowerCase())) { alert(`"${t}" already exists.`); return false; }
+  const idx = state.days.indexOf(oldName); if (idx === -1) return false;
+  state.days[idx] = t;
+  state.workouts[t] = (state.workouts[oldName] || []).map(w => ({ ...w, Day: t }));
+  delete state.workouts[oldName];
+  if (state.currentDay === oldName) state.currentDay = t;
+  saveState(); return true;
+}
 
+async function deleteDay(day) {
+  if (!confirm(`Delete "${day}" and all its workouts?\n\nThis cannot be undone.`)) return;
+  for (const w of (state.workouts[day] || [])) {
+    if (w._imgKey) await deleteImage(w._imgKey);
+    state.completedIDs.delete(w.id);
+  }
+  state.days = state.days.filter(d => d !== day);
+  delete state.workouts[day];
   saveState();
+  if (state.currentDay === day) { state.view = 'week'; state.currentDay = null; state.showModal = false; state.editTarget = null; }
   render();
-  loadDayImages(day);
+}
+
+async function duplicateDay(sourceName) {
+  const base = `${sourceName} (Copy)`;
+  let name = base, n = 2;
+  while (state.days.map(d => d.toLowerCase()).includes(name.toLowerCase())) name = `${base} ${n++}`;
+
+  const sourceWorkouts = state.workouts[sourceName] || [];
+  const newWorkouts = sourceWorkouts.map(w => ({ ...w, id: uuid(), _imgKey: uuid(), Day: name }));
+  state.days.push(name);
+  state.workouts[name] = newWorkouts;
+  saveState();
+
+  // Copy images in background
+  for (let i = 0; i < sourceWorkouts.length; i++) {
+    const src = sourceWorkouts[i];
+    if (!src._imgKey) continue;
+    const data = await getImage(src._imgKey);
+    if (data) await saveImage(newWorkouts[i]._imgKey, data);
+  }
+  return name;
 }
 
 // ─── Timer ────────────────────────────────────────────────────────────────────
 
-function setTimerPreset(seconds) {
+function setTimerPreset(s) {
   if (timer.running) return;
-  timer.preset  = seconds;
-  timer.seconds = seconds;
-  timer.initial = seconds;
+  timer.preset = timer.seconds = timer.initial = s;
   updateTimerDisplay();
 }
 
 function startTimer() {
   if (timer.running) return;
-  timer.initial = timer.seconds > 0 ? timer.seconds : timer.preset;
-  timer.seconds = timer.initial;
-  timer.running = true;
+  timer.expanded = true;
+  timer.initial  = timer.seconds > 0 ? timer.seconds : timer.preset;
+  timer.seconds  = timer.initial;
+  timer.running  = true;
   timer.intervalId = setInterval(tickTimer, 1000);
-  updateTimerDisplay();
+  replaceTimerCard();
 }
 
 function pauseTimer() {
   if (!timer.running) return;
-  timer.running = false;
-  clearInterval(timer.intervalId);
-  timer.intervalId = null;
+  timer.running = false; clearInterval(timer.intervalId); timer.intervalId = null;
   updateTimerDisplay();
 }
 
 function resetTimer() {
-  clearInterval(timer.intervalId);
-  timer.intervalId = null;
-  timer.running = false;
-  timer.seconds = timer.preset;
-  timer.initial = timer.preset;
+  clearInterval(timer.intervalId); timer.intervalId = null;
+  timer.running = false; timer.seconds = timer.preset; timer.initial = timer.preset;
   updateTimerDisplay();
-  const card = document.getElementById('timer-card');
-  if (card) card.classList.remove('timer-done');
+  document.getElementById('timer-card')?.classList.remove('timer-done');
 }
 
 function tickTimer() {
   if (timer.seconds > 0) {
-    timer.seconds--;
-    updateTimerDisplay();
+    timer.seconds--; updateTimerDisplay();
   } else {
-    clearInterval(timer.intervalId);
-    timer.intervalId = null;
-    timer.running = false;
+    clearInterval(timer.intervalId); timer.intervalId = null; timer.running = false;
     updateTimerDisplay();
-    // Vibrate on finish if supported
+    playTimerBeep();
     if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
-    const card = document.getElementById('timer-card');
-    if (card) card.classList.add('timer-done');
+    document.getElementById('timer-card')?.classList.add('timer-done');
   }
 }
 
+function playTimerBeep() {
+  try {
+    const ctx  = new (window.AudioContext || window.webkitAudioContext)();
+    const beep = (freq, start, dur, vol = 0.35) => {
+      const osc  = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.type = 'sine'; osc.frequency.value = freq;
+      gain.gain.setValueAtTime(vol, ctx.currentTime + start);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + start + dur);
+      osc.start(ctx.currentTime + start);
+      osc.stop(ctx.currentTime + start + dur + 0.05);
+    };
+    beep(880,  0,    0.12);
+    beep(880,  0.18, 0.12);
+    beep(1047, 0.36, 0.28, 0.45); // higher final tone
+  } catch (_) {}
+}
+
 function updateTimerDisplay() {
-  const displayEl = document.getElementById('timer-display');
+  const displayEl  = document.getElementById('timer-display');
   const progressEl = document.getElementById('timer-progress');
   const startBtn   = document.getElementById('timer-start-btn');
   const card       = document.getElementById('timer-card');
@@ -422,71 +549,60 @@ function updateTimerDisplay() {
   const secs = timer.seconds % 60;
   displayEl.textContent = `${mins}:${String(secs).padStart(2, '0')}`;
 
-  if (progressEl) {
-    const pct = timer.initial > 0 ? (timer.seconds / timer.initial) * 100 : 100;
-    progressEl.style.width = `${pct}%`;
-  }
-
-  if (startBtn) {
-    startBtn.innerHTML = timer.running
-      ? `${ICONS.timerPause}<span>Pause</span>`
-      : `${ICONS.timerPlay}<span>Start</span>`;
-  }
-
-  // Update preset buttons (disable while running)
-  document.querySelectorAll('.timer-preset-btn').forEach(btn => {
-    btn.disabled = timer.running;
-    btn.classList.toggle('active', !timer.running && Number(btn.dataset.seconds) === timer.preset);
+  if (progressEl) progressEl.style.width = `${timer.initial > 0 ? (timer.seconds / timer.initial) * 100 : 100}%`;
+  if (startBtn) startBtn.innerHTML = timer.running
+    ? `${ICONS.timerPause}<span>Pause</span>`
+    : `${ICONS.timerPlay}<span>Start</span>`;
+  document.querySelectorAll('.timer-preset-btn').forEach(b => {
+    b.disabled = timer.running;
+    b.classList.toggle('active', !timer.running && Number(b.dataset.seconds) === timer.preset);
   });
-
   if (card) card.classList.toggle('timer-running', timer.running);
+}
+
+function replaceTimerCard() {
+  const existing = document.getElementById('timer-card');
+  if (!existing) return;
+  const tmp = document.createElement('div');
+  tmp.innerHTML = renderTimerCard();
+  existing.replaceWith(tmp.firstElementChild);
 }
 
 // ─── Export / Import ──────────────────────────────────────────────────────────
 
 function exportData() {
   const data = {
-    version:      2,
-    exportedAt:   new Date().toISOString(),
-    customEdits:  state.customEdits,
+    version: 3, exportedAt: new Date().toISOString(),
+    days: state.days, workouts: state.workouts,
     completedIDs: [...state.completedIDs],
-    weekHistory:  loadWeekHistory(),
+    weekHistory: loadWeekHistory(),
+    logs: loadLogs(),
   };
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
   const url  = URL.createObjectURL(blob);
-  const a    = document.createElement('a');
-  a.href     = url;
-  a.download = `workout-backup-${new Date().toISOString().split('T')[0]}.json`;
-  a.click();
-  URL.revokeObjectURL(url);
+  const a    = Object.assign(document.createElement('a'), { href: url, download: `workout-backup-${getTodayKey()}.json` });
+  a.click(); URL.revokeObjectURL(url);
 }
 
 async function importData(file) {
   try {
-    const text = await file.text();
-    const data = JSON.parse(text);
-    if (!data.customEdits && !data.completedIDs) {
-      throw new Error('This file does not look like a Workout Tracker backup.');
-    }
-    if (data.customEdits)  state.customEdits  = data.customEdits;
-    if (data.completedIDs) state.completedIDs = new Set(data.completedIDs);
-    if (data.weekHistory)  localStorage.setItem(KEYS.history, JSON.stringify(data.weekHistory));
+    const data = JSON.parse(await file.text());
+    if (!data.days || !data.workouts) throw new Error('Not a valid Workout Tracker backup.');
+    state.days = data.days; state.workouts = data.workouts;
+    state.completedIDs = new Set(data.completedIDs || []);
+    if (data.weekHistory) localStorage.setItem(KEYS.history, JSON.stringify(data.weekHistory));
+    if (data.logs)        saveLogs(data.logs);
     saveState();
     alert('Import successful! Note: exercise photos are not included in backups.');
     render();
     if (state.view === 'day') loadDayImages(state.currentDay);
-  } catch (err) {
-    alert(`Import failed: ${err.message}`);
-  }
+  } catch (err) { alert(`Import failed: ${err.message}`); }
 }
 
 function triggerImport() {
-  const input = document.createElement('input');
-  input.type = 'file';
-  input.accept = '.json,application/json';
+  const input = Object.assign(document.createElement('input'), { type: 'file', accept: '.json,application/json' });
   input.onchange = e => { if (e.target.files[0]) importData(e.target.files[0]); };
-  document.body.appendChild(input);
-  input.click();
+  document.body.appendChild(input); input.click();
   setTimeout(() => input.remove(), 10000);
 }
 
@@ -499,118 +615,124 @@ function applyTheme() {
 }
 
 function toggleDarkMode() {
-  state.isDarkMode = !state.isDarkMode;
-  applyTheme();
-  saveState();
-  render();
+  state.isDarkMode = !state.isDarkMode; applyTheme(); saveState(); render();
   if (state.view === 'day') loadDayImages(state.currentDay);
 }
 
 // ─── SVG Icons ────────────────────────────────────────────────────────────────
 
 const ICONS = {
-  refresh:    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>`,
-  sun:        `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>`,
-  moon:       `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>`,
-  chevron:    `<svg class="day-chevron" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="14" height="14"><polyline points="9 18 15 12 9 6"/></svg>`,
-  back:       `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><polyline points="15 18 9 12 15 6"/></svg>`,
-  reset:      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-3.11"/></svg>`,
-  trash:      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>`,
-  plus:       `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="18" height="18"><path d="M12 2a10 10 0 1 0 0 20A10 10 0 0 0 12 2zm5 11h-4v4h-2v-4H7v-2h4V7h2v4h4v2z"/></svg>`,
-  camera:     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>`,
-  cameraBig:  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" width="32" height="32"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>`,
-  circle:     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="24" height="24"><circle cx="12" cy="12" r="10"/></svg>`,
-  checked:    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24"><circle cx="12" cy="12" r="11" fill="#34c759"/><polyline points="7 12.5 10.5 16 17 9" fill="none" stroke="white" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
-  edit:       `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="15" height="15"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>`,
-  history:    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-3.11"/><polyline points="12 7 12 12 15 15"/></svg>`,
-  export:     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`,
-  import:     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>`,
-  timerPlay:  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><polygon points="5 3 19 12 5 21 5 3"/></svg>`,
-  timerPause: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>`,
-  timerReset: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-3.11"/></svg>`,
-  checkAll:   `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="15" height="15"><polyline points="20 6 9 17 4 12"/></svg>`,
+  sun:          `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>`,
+  moon:         `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>`,
+  chevron:      `<svg class="day-chevron" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="14" height="14"><polyline points="9 18 15 12 9 6"/></svg>`,
+  chevronUp:    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="14" height="14"><polyline points="18 15 12 9 6 15"/></svg>`,
+  back:         `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><polyline points="15 18 9 12 15 6"/></svg>`,
+  reset:        `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-3.11"/></svg>`,
+  trash:        `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>`,
+  plus:         `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="18" height="18"><path d="M12 2a10 10 0 1 0 0 20A10 10 0 0 0 12 2zm5 11h-4v4h-2v-4H7v-2h4V7h2v4h4v2z"/></svg>`,
+  plusSimple:   `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="22" height="22"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>`,
+  camera:       `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>`,
+  cameraBig:    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" width="32" height="32"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>`,
+  circle:       `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="24" height="24"><circle cx="12" cy="12" r="10"/></svg>`,
+  checked:      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24"><circle cx="12" cy="12" r="11" fill="#34c759"/><polyline points="7 12.5 10.5 16 17 9" fill="none" stroke="white" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  edit:         `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="15" height="15"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>`,
+  copy:         `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="15" height="15"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`,
+  history:      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-3.11"/><polyline points="12 7 12 12 15 15"/></svg>`,
+  export:       `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`,
+  import:       `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>`,
+  timerPlay:    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><polygon points="5 3 19 12 5 21 5 3"/></svg>`,
+  timerPause:   `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>`,
+  timerReset:   `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-3.11"/></svg>`,
+  checkAll:     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="15" height="15"><polyline points="20 6 9 17 4 12"/></svg>`,
+  dotsVertical: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="18" height="18"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>`,
+  dragHandle:   `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="18" height="18"><rect x="4" y="6" width="16" height="2" rx="1"/><rect x="4" y="11" width="16" height="2" rx="1"/><rect x="4" y="16" width="16" height="2" rx="1"/></svg>`,
+  flame:        `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="13" height="13"><path d="M12 2C9 6 7 8.5 7 12a5 5 0 0 0 10 0c0-2.5-1-4.5-2-6-1 2-1.5 2.5-2 3-.5-.5-1-2-1-4z" opacity=".8"/><path d="M12 8c-.5 2-.8 3-2 4a3 3 0 0 0 6 0c0-1.5-.5-2.5-1-3.5-.5 1-.8 1.5-1.5 1.5C13 9.5 12.5 9 12 8z"/></svg>`,
 };
 
 // ─── HTML Helpers ─────────────────────────────────────────────────────────────
 
 function esc(s) {
   if (s == null) return '';
-  return String(s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
 // ─── Render: Week View ────────────────────────────────────────────────────────
 
 function renderWeekView() {
   const today = getTodayDayName();
+  const totalDone = state.days.reduce((s,d) => s + (state.workouts[d]||[]).filter(w=>state.completedIDs.has(w.id)).length, 0);
+  const totalAll  = state.days.reduce((s,d) => s + (state.workouts[d]||[]).length, 0);
+  const weekPct   = totalAll > 0 ? Math.round(totalDone / totalAll * 100) : 0;
+  const streak    = calculateStreak();
 
-  const dayCards = WORKOUT_DAYS.map(day => {
-    const workouts = getDayData(day);
-    const done  = workouts.filter(w => state.completedIDs.has(workoutID(day, w.Index))).length;
+  const summaryHTML = totalAll > 0 ? `
+    <div class="week-summary">
+      <span class="week-summary-label">This week</span>
+      <div class="week-summary-track"><div class="week-summary-fill" style="width:${weekPct}%"></div></div>
+      <span class="week-summary-stat">${totalDone}/${totalAll} · ${weekPct}%</span>
+      ${streak > 0 ? `<span class="streak-badge">${ICONS.flame}${streak}w</span>` : ''}
+    </div>` : '';
+
+  const dayRows = state.days.map(day => {
+    const workouts = state.workouts[day] || [];
+    const done  = workouts.filter(w => state.completedIDs.has(w.id)).length;
     const total = workouts.length;
-    const pct   = total > 0 ? Math.round((done / total) * 100) : 0;
+    const pct   = total > 0 ? Math.round(done / total * 100) : 0;
     const isToday = day === today;
 
+    const rightContent = total === 0
+      ? `<span class="day-empty-hint">Add workouts</span>`
+      : `<span class="day-count">${done}/${total}</span><span class="day-pct">${pct}%</span>`;
+
     return `
-      <button class="day-card${isToday ? ' today' : ''}" data-action="nav-day" data-day="${esc(day)}">
-        <div class="day-card-left">
-          <div class="day-name-row">
-            <span class="day-name">${esc(day)}</span>
-            ${isToday ? '<span class="today-badge">Today</span>' : ''}
+      <div class="day-row">
+        <button class="day-card${isToday ? ' today' : ''}" data-action="nav-day" data-day="${esc(day)}">
+          <div class="day-card-left">
+            <div class="day-name-row">
+              <span class="day-name">${esc(day)}</span>
+              ${isToday ? '<span class="today-badge">Today</span>' : ''}
+            </div>
+            <div class="progress-track"><div class="progress-fill" style="width:${pct}%"></div></div>
           </div>
-          <div class="progress-track">
-            <div class="progress-fill" style="width:${pct}%"></div>
-          </div>
-        </div>
-        <div class="day-card-right">
-          <span class="day-count">${done}/${total}</span>
-          <span class="day-pct">${pct}%</span>
-          ${ICONS.chevron}
-        </div>
-      </button>`;
+          <div class="day-card-right">${rightContent}${ICONS.chevron}</div>
+        </button>
+        <button class="day-options-btn" data-action="edit-day" data-day="${esc(day)}" title="Edit ${esc(day)}">
+          ${ICONS.dotsVertical}
+        </button>
+      </div>`;
   }).join('');
 
-  const statusHTML = state.isLoading
-    ? `<div class="card"><div class="loading-row"><div class="spinner"></div>Loading workouts…</div></div>`
-    : state.errorMessage
-      ? `<div class="error-card">${esc(state.errorMessage)}</div>`
-      : '';
-
   const historySheet = state.showHistory ? renderHistorySheet() : '';
+  const modalHTML    = state.showModal === 'add-day'  ? renderAddDayModal()
+                     : state.showModal === 'edit-day' ? renderEditDayModal()
+                     : '';
 
   return `
     <div class="view week-view">
       <header class="app-header">
         <h1 class="app-title">Workout Tracker</h1>
         <div class="header-actions">
-          <button class="icon-btn" data-action="show-history" title="View history">${ICONS.history}</button>
-          <button class="icon-btn" data-action="refresh" title="Refresh workouts">${ICONS.refresh}</button>
-          <button class="icon-btn" data-action="toggle-dark" title="Toggle dark mode">
+          <button class="icon-btn" data-action="show-history" title="History">${ICONS.history}</button>
+          <button class="icon-btn" data-action="toggle-dark"  title="Toggle dark mode">
             ${state.isDarkMode ? ICONS.sun : ICONS.moon}
           </button>
         </div>
       </header>
       <div class="content">
-        ${statusHTML}
+        ${summaryHTML}
         <div class="section-label">Weekly Plan</div>
-        <div class="card">${dayCards}</div>
-
+        <div class="card">${dayRows || '<div class="empty-state">No training days yet — add one below.</div>'}</div>
+        <button class="add-day-btn" data-action="show-add-day">${ICONS.plusSimple} Add Training Day</button>
         <div class="data-actions">
           <button class="data-action-btn" data-action="export">${ICONS.export} Export Backup</button>
           <button class="data-action-btn" data-action="import">${ICONS.import} Import Backup</button>
         </div>
-
         <div class="reset-all-wrap">
-          <button class="btn-destructive" data-action="reset-all">
-            ${ICONS.trash} Reset All Progress
-          </button>
+          <button class="btn-destructive" data-action="reset-all">${ICONS.trash} Reset All Progress</button>
         </div>
       </div>
     </div>
-    ${historySheet}`;
+    ${historySheet}${modalHTML}`;
 }
 
 // ─── Render: History Sheet ────────────────────────────────────────────────────
@@ -618,34 +740,30 @@ function renderWeekView() {
 function renderHistorySheet() {
   const history = loadWeekHistory();
   const weeks   = Object.keys(history).sort().reverse().slice(0, 10);
-
   const content = weeks.length === 0
     ? '<div class="empty-state">No history yet — complete some workouts first.</div>'
     : weeks.map(key => {
-        const week = history[key];
-        const totalDone  = WORKOUT_DAYS.reduce((s, d) => s + (week[d]?.done  || 0), 0);
-        const totalAll   = WORKOUT_DAYS.reduce((s, d) => s + (week[d]?.total || 0), 0);
-        const overallPct = totalAll > 0 ? Math.round(totalDone / totalAll * 100) : 0;
-
-        const dayDots = WORKOUT_DAYS.map(day => {
-          const d   = week[day] || { done: 0, total: 0 };
-          const pct = d.total > 0 ? Math.round(d.done / d.total * 100) : -1;
-          const cls = pct === 100 ? 'full' : pct > 0 ? 'partial' : pct === 0 ? 'none' : 'missing';
+        const week = history[key], histDays = Object.keys(week);
+        const tDone = histDays.reduce((s,d) => s + (week[d]?.done||0), 0);
+        const tAll  = histDays.reduce((s,d) => s + (week[d]?.total||0), 0);
+        const pct   = tAll > 0 ? Math.round(tDone/tAll*100) : 0;
+        const dots  = histDays.map(day => {
+          const d = week[day]||{done:0,total:0};
+          const p = d.total > 0 ? Math.round(d.done/d.total*100) : -1;
+          const cls = p===100?'full':p>0?'partial':p===0?'none':'missing';
           return `<div class="hist-day-col">
-            <span class="hist-day-label">${day.slice(0, 3)}</span>
+            <span class="hist-day-label">${esc(day.slice(0,3))}</span>
             <div class="hist-dot ${cls}"></div>
-            <span class="hist-day-pct">${pct >= 0 ? pct + '%' : '—'}</span>
+            <span class="hist-day-pct">${p>=0?p+'%':'—'}</span>
           </div>`;
         }).join('');
-
-        return `
-          <div class="hist-row">
-            <div class="hist-row-top">
-              <span class="hist-week-label">${weekKeyToLabel(key)}</span>
-              <span class="hist-overall-pct ${overallPct === 100 ? 'perfect' : ''}">${overallPct}%</span>
-            </div>
-            <div class="hist-days">${dayDots}</div>
-          </div>`;
+        return `<div class="hist-row">
+          <div class="hist-row-top">
+            <span class="hist-week-label">${weekKeyToLabel(key)}</span>
+            <span class="hist-overall-pct${pct===100?' perfect':''}">${pct}%</span>
+          </div>
+          <div class="hist-days">${dots}</div>
+        </div>`;
       }).join('');
 
   return `
@@ -661,36 +779,87 @@ function renderHistorySheet() {
     </div>`;
 }
 
+// ─── Render: Day Modals ───────────────────────────────────────────────────────
+
+function renderAddDayModal() {
+  return `
+    <div class="modal-overlay" id="modal-overlay">
+      <div class="modal" role="dialog" aria-modal="true">
+        <div class="modal-header">
+          <button class="modal-cancel" data-action="close-modal">Cancel</button>
+          <span class="modal-title">New Training Day</span>
+          <button class="modal-save" data-action="save-day">Add</button>
+        </div>
+        <form class="modal-form" onsubmit="return false">
+          <div class="form-section">
+            <label class="form-label">Day Name</label>
+            <div class="form-card">
+              <input id="f-day-name" class="form-input" type="text"
+                     placeholder="e.g. Tuesday, Leg Day…" autocomplete="off">
+            </div>
+          </div>
+        </form>
+      </div>
+    </div>`;
+}
+
+function renderEditDayModal() {
+  const day = state.editTarget?.day || '';
+  return `
+    <div class="modal-overlay" id="modal-overlay">
+      <div class="modal" role="dialog" aria-modal="true">
+        <div class="modal-header">
+          <button class="modal-cancel" data-action="close-modal">Cancel</button>
+          <span class="modal-title">Edit Day</span>
+          <button class="modal-save" data-action="save-rename-day" data-day="${esc(day)}">Save</button>
+        </div>
+        <form class="modal-form" onsubmit="return false">
+          <div class="form-section">
+            <label class="form-label">Rename</label>
+            <div class="form-card">
+              <input id="f-day-name" class="form-input" type="text"
+                     placeholder="Day name" autocomplete="off" value="${esc(day)}">
+            </div>
+          </div>
+          <div class="form-section">
+            <div class="card">
+              <button type="button" class="list-btn blue" data-action="duplicate-day" data-day="${esc(day)}">
+                ${ICONS.copy} Duplicate Day
+              </button>
+            </div>
+          </div>
+          <div class="form-section">
+            <button type="button" class="btn-destructive" data-action="delete-day"
+                    data-day="${esc(day)}" style="width:100%;justify-content:center">
+              ${ICONS.trash} Delete "${esc(day)}" and All Its Workouts
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>`;
+}
+
 // ─── Render: Day View ─────────────────────────────────────────────────────────
 
 function renderDayView() {
-  const day            = state.currentDay;
-  const allWorkouts    = getDayData(day);
-  const originalsCount = state.sheetData.filter(r => r.Day === day).length;
-  const categories     = getCategories(day);
+  const day        = state.currentDay;
+  const workouts   = state.workouts[day] || [];
+  const categories = getCategories(day);
 
   const filtered = state.filterCategory
-    ? allWorkouts.filter(w => w.Category === state.filterCategory)
-    : allWorkouts;
+    ? workouts.filter(w => w.Category === state.filterCategory)
+    : workouts;
 
   const items = filtered.map(w => {
-    const id       = workoutID(day, w.Index);
-    const done     = state.completedIDs.has(id);
-    const isCustom = w.Index >= originalsCount;
-    const imgKey   = getImageKey(w);
-    const badge    = w.Category ? `<span class="badge">${esc(w.Category)}</span>` : '';
-    const notes    = w.Notes    ? `<p class="workout-notes">${esc(w.Notes)}</p>`  : '';
-
-    const actions = isCustom
-      ? `<div class="workout-actions">
-           <button class="edit-btn" data-action="edit-workout" data-day="${esc(day)}" data-index="${w.Index}" title="Edit">${ICONS.edit}</button>
-           <button class="delete-btn" data-action="delete-workout" data-day="${esc(day)}" data-index="${w.Index}" title="Delete">${ICONS.trash}</button>
-         </div>`
-      : '';
+    const done  = state.completedIDs.has(w.id);
+    const badge = w.Category ? `<span class="badge">${esc(w.Category)}</span>` : '';
+    const notes = w.Notes    ? `<p class="workout-notes">${esc(w.Notes)}</p>`   : '';
 
     return `
-      <div class="workout-item" style="--swipe-x:0px">
-        <button class="check-btn" data-action="toggle" data-id="${esc(id)}" aria-label="${done ? 'Mark incomplete' : 'Mark complete'}">
+      <div class="workout-item" style="--swipe-x:0px" data-workout-id="${esc(w.id)}" data-day="${esc(day)}">
+        <button class="drag-handle" data-action="drag-noop" aria-label="Drag to reorder">${ICONS.dragHandle}</button>
+        <button class="check-btn" data-action="toggle" data-id="${esc(w.id)}"
+                aria-label="${done ? 'Mark incomplete' : 'Mark complete'}">
           ${done ? ICONS.checked : ICONS.circle}
         </button>
         <div class="workout-body">
@@ -699,29 +868,30 @@ function renderDayView() {
             ${badge}
           </div>
           ${notes}
-          <img class="workout-img" data-img-key="${esc(imgKey)}"
+          <img class="workout-img" data-img-key="${esc(w._imgKey)}"
                src="" alt="Exercise photo" data-action="view-image" style="display:none">
           <button class="photo-btn" data-action="add-image"
-                  data-day="${esc(day)}" data-index="${w.Index}"
-                  data-img-key="${esc(imgKey)}">
+                  data-day="${esc(day)}" data-workout-id="${esc(w.id)}" data-img-key="${esc(w._imgKey)}">
             ${ICONS.camera}<span class="photo-btn-label">Add Photo</span>
           </button>
+          ${renderLogSection(w.id)}
         </div>
-        ${actions}
+        <button class="workout-more-btn" data-action="expand-workout"
+                data-workout-id="${esc(w.id)}" aria-label="More options">${ICONS.dotsVertical}</button>
+        <div class="workout-actions">
+          <button class="edit-btn"   data-action="edit-workout"   data-day="${esc(day)}" data-workout-id="${esc(w.id)}" title="Edit">${ICONS.edit}</button>
+          <button class="delete-btn" data-action="delete-workout" data-day="${esc(day)}" data-workout-id="${esc(w.id)}" title="Delete">${ICONS.trash}</button>
+        </div>
       </div>`;
   }).join('');
 
-  // Category filter pills
   const filterPills = categories.length > 1
     ? `<div class="filter-bar">
-        <button class="filter-pill${!state.filterCategory ? ' active' : ''}" data-action="filter" data-cat="">All</button>
-        ${categories.map(c =>
-          `<button class="filter-pill${state.filterCategory === c ? ' active' : ''}" data-action="filter" data-cat="${esc(c)}">${esc(c)}</button>`
-        ).join('')}
-       </div>`
-    : '';
+        <button class="filter-pill${!state.filterCategory?' active':''}" data-action="filter" data-cat="">All</button>
+        ${categories.map(c=>`<button class="filter-pill${state.filterCategory===c?' active':''}" data-action="filter" data-cat="${esc(c)}">${esc(c)}</button>`).join('')}
+       </div>` : '';
 
-  const modalHTML = state.showModal ? renderModal() : '';
+  const modalHTML = state.showModal==='add'||state.showModal==='edit' ? renderWorkoutModal() : '';
 
   return `
     <div class="view day-view">
@@ -731,32 +901,18 @@ function renderDayView() {
         <div class="header-spacer"></div>
       </header>
       <div class="content">
-
         ${renderTimerCard()}
-
         <div class="card">
-          <button class="list-btn orange" data-action="reset-day" data-day="${esc(day)}">
-            ${ICONS.reset} Reset Day Progress
-          </button>
+          <button class="list-btn orange" data-action="reset-day" data-day="${esc(day)}">${ICONS.reset} Reset Day Progress</button>
         </div>
-
         <div class="section-header">
           <span class="section-label" style="margin:0">Workouts</span>
-          <button class="complete-all-btn" data-action="complete-all" data-day="${esc(day)}">
-            ${ICONS.checkAll} Complete All
-          </button>
+          <button class="complete-all-btn" data-action="complete-all" data-day="${esc(day)}">${ICONS.checkAll} Complete All</button>
         </div>
         ${filterPills}
-        <div class="card">
-          ${items || '<div class="empty-state">No workouts found.</div>'}
-        </div>
-
-        <div class="card">
-          <button class="list-btn blue" data-action="show-modal" data-day="${esc(day)}">
-            ${ICONS.plus} Add Custom Workout
-          </button>
-        </div>
+        <div class="card">${items || '<div class="empty-state">No workouts yet — tap + to add your first one.</div>'}</div>
       </div>
+      <button class="fab" data-action="show-modal" aria-label="Add workout">${ICONS.plusSimple}</button>
     </div>
     ${modalHTML}`;
 }
@@ -767,64 +923,64 @@ function renderTimerCard() {
   const mins    = Math.floor(timer.seconds / 60);
   const secs    = timer.seconds % 60;
   const timeStr = `${mins}:${String(secs).padStart(2, '0')}`;
+
+  if (!timer.expanded && !timer.running) {
+    return `
+      <button class="timer-pill" data-action="timer-expand" id="timer-card">
+        ${ICONS.timerPlay}
+        <span class="timer-pill-label">Rest Timer</span>
+        <span class="timer-pill-chevron">${ICONS.chevron}</span>
+      </button>`;
+  }
+
   const pct     = timer.initial > 0 ? (timer.seconds / timer.initial) * 100 : 100;
-
-  const presets = [
-    { s: 30,  label: '30s' },
-    { s: 60,  label: '1m'  },
-    { s: 90,  label: '90s' },
-    { s: 120, label: '2m'  },
-  ];
-
+  const presets = [{s:30,l:'30s'},{s:60,l:'1m'},{s:90,l:'90s'},{s:120,l:'2m'}];
   const presetBtns = presets.map(p =>
-    `<button class="timer-preset-btn${timer.preset === p.s && !timer.running ? ' active' : ''}"
+    `<button class="timer-preset-btn${timer.preset===p.s&&!timer.running?' active':''}"
              data-action="timer-preset" data-seconds="${p.s}"
-             ${timer.running ? 'disabled' : ''}>${p.label}</button>`
-  ).join('');
+             ${timer.running?'disabled':''}>${p.l}</button>`).join('');
 
   return `
-    <div class="card timer-card${timer.running ? ' timer-running' : ''}" id="timer-card">
-      <div class="timer-progress-wrap">
-        <div class="timer-progress" id="timer-progress" style="width:${pct}%"></div>
-      </div>
+    <div class="card timer-card${timer.running?' timer-running':''}" id="timer-card">
+      <div class="timer-progress-wrap"><div class="timer-progress" id="timer-progress" style="width:${pct}%"></div></div>
       <div class="timer-inner">
         <div class="timer-left">
-          <span class="timer-label">REST TIMER</span>
+          <div class="timer-label-row">
+            <span class="timer-label">REST TIMER</span>
+            ${!timer.running?`<button class="timer-collapse-btn" data-action="timer-expand" title="Minimize">${ICONS.chevronUp}</button>`:''}
+          </div>
           <div class="timer-preset-row">${presetBtns}</div>
         </div>
         <div class="timer-right">
           <span class="timer-display" id="timer-display">${timeStr}</span>
           <div class="timer-btn-row">
             <button class="timer-start-btn" id="timer-start-btn" data-action="timer-toggle">
-              ${timer.running ? ICONS.timerPause + '<span>Pause</span>' : ICONS.timerPlay + '<span>Start</span>'}
+              ${timer.running?ICONS.timerPause+'<span>Pause</span>':ICONS.timerPlay+'<span>Start</span>'}
             </button>
-            <button class="timer-reset-icon-btn" data-action="timer-reset" title="Reset timer">
-              ${ICONS.timerReset}
-            </button>
+            <button class="timer-reset-icon-btn" data-action="timer-reset" title="Reset">${ICONS.timerReset}</button>
           </div>
         </div>
       </div>
     </div>`;
 }
 
-// ─── Render: Add / Edit Workout Modal ─────────────────────────────────────────
+// ─── Render: Workout Modal ────────────────────────────────────────────────────
 
-function renderModal() {
+function renderWorkoutModal() {
   const isEdit = state.showModal === 'edit';
   let prefill  = { name: '', category: '', notes: '' };
 
   if (isEdit && state.editTarget) {
-    const { day, index } = state.editTarget;
-    const originalsCount = state.sheetData.filter(r => r.Day === day).length;
-    const row = state.customEdits[day]?.[index - originalsCount];
-    if (row) {
-      prefill.name     = row.Workout  || '';
-      prefill.category = row.Category || '';
-      prefill.notes    = row.Notes    || '';
-    }
+    const { day, workoutId } = state.editTarget;
+    const w = (state.workouts[day]||[]).find(x => x.id === workoutId);
+    if (w) { prefill.name = w.Workout||''; prefill.category = w.Category||''; prefill.notes = w.Notes||''; }
   }
 
-  // Image section: pendingImg > editCurrentImg > placeholder
+  const allCats = getAllCategories();
+  const datalist = allCats.length
+    ? `<datalist id="category-list">${allCats.map(c=>`<option value="${esc(c)}">`).join('')}</datalist>`
+    : '';
+
   const imgDataURL = pendingImg?.dataURL || (!editImgRemoved ? editCurrentImg : null);
   const imgSection = imgDataURL
     ? `<div class="img-upload-has-image">
@@ -832,31 +988,30 @@ function renderModal() {
          <button type="button" class="img-remove-btn" data-action="remove-modal-image">✕ Remove</button>
        </div>`
     : `<div class="img-upload-placeholder" data-action="pick-modal-image">
-         ${ICONS.cameraBig}
-         <span>Tap to add a reference photo</span>
+         ${ICONS.cameraBig}<span>Tap to add a reference photo</span>
        </div>`;
 
   return `
     <div class="modal-overlay" id="modal-overlay">
-      <div class="modal" role="dialog" aria-modal="true" id="modal-box">
+      <div class="modal" role="dialog" aria-modal="true">
         <div class="modal-header">
           <button class="modal-cancel" data-action="close-modal">Cancel</button>
           <span class="modal-title">${isEdit ? 'Edit Workout' : 'New Workout'}</span>
           <button class="modal-save" data-action="save-workout"
-                  data-day="${esc(isEdit ? state.editTarget.day : state.currentDay)}"
-                  data-edit="${isEdit}">${isEdit ? 'Save' : 'Add'}</button>
+                  data-day="${esc(isEdit?state.editTarget.day:state.currentDay)}"
+                  data-edit="${isEdit}">${isEdit?'Save':'Add'}</button>
         </div>
-        <form class="modal-form" id="add-form" onsubmit="return false">
+        <form class="modal-form" onsubmit="return false">
+          ${datalist}
           <div class="form-section">
             <label class="form-label">Workout Details</label>
             <div class="form-card">
-              <input id="f-name"     class="form-input" type="text"
-                     placeholder="Workout Name (required)" autocomplete="off"
-                     value="${esc(prefill.name)}">
+              <input id="f-name" class="form-input" type="text"
+                     placeholder="Workout Name (required)" autocomplete="off" value="${esc(prefill.name)}">
               <div class="form-divider"></div>
               <input id="f-category" class="form-input" type="text"
                      placeholder="Category (optional)" autocomplete="off"
-                     value="${esc(prefill.category)}">
+                     list="category-list" value="${esc(prefill.category)}">
             </div>
           </div>
           <div class="form-section">
@@ -883,13 +1038,8 @@ function render() {
   app.innerHTML = state.view === 'week' ? renderWeekView() : renderDayView();
   if (state.showModal) {
     requestAnimationFrame(() => {
-      const nameInput = document.getElementById('f-name');
-      if (nameInput) {
-        nameInput.focus();
-        // Move cursor to end for edit mode
-        const len = nameInput.value.length;
-        nameInput.setSelectionRange(len, len);
-      }
+      const first = document.getElementById('f-day-name') || document.getElementById('f-name');
+      if (first) { first.focus(); first.setSelectionRange(first.value.length, first.value.length); }
     });
   }
 }
@@ -897,15 +1047,13 @@ function render() {
 // ─── Async Image Loading ──────────────────────────────────────────────────────
 
 async function loadDayImages(day) {
-  const workouts = getDayData(day);
-  for (const w of workouts) {
-    const key    = getImageKey(w);
-    const dataURL = await getImage(key);
+  for (const w of (state.workouts[day] || [])) {
+    if (!w._imgKey) continue;
+    const dataURL = await getImage(w._imgKey);
     if (!dataURL) continue;
-    const imgEl = document.querySelector(`img[data-img-key="${CSS.escape(key)}"]`);
+    const imgEl = document.querySelector(`img[data-img-key="${CSS.escape(w._imgKey)}"]`);
     if (!imgEl) continue;
-    imgEl.src = dataURL;
-    imgEl.style.display = '';
+    imgEl.src = dataURL; imgEl.style.display = '';
     const label = imgEl.closest('.workout-body')?.querySelector('.photo-btn-label');
     if (label) label.textContent = 'Change Photo';
   }
@@ -916,15 +1064,12 @@ async function loadDayImages(day) {
 function showImageViewer(dataURL) {
   document.getElementById('img-viewer')?.remove();
   const viewer = document.createElement('div');
-  viewer.id = 'img-viewer';
-  viewer.className = 'img-viewer';
+  viewer.id = 'img-viewer'; viewer.className = 'img-viewer';
   viewer.innerHTML = `
     <div class="img-viewer-backdrop"></div>
     <img class="img-viewer-img" src="${dataURL}" alt="Exercise photo">
     <button class="img-viewer-close" aria-label="Close">✕</button>`;
-  viewer.addEventListener('click', e => {
-    if (!e.target.closest('.img-viewer-img')) viewer.remove();
-  });
+  viewer.addEventListener('click', e => { if (!e.target.closest('.img-viewer-img')) viewer.remove(); });
   document.body.appendChild(viewer);
 }
 
@@ -934,256 +1079,271 @@ function setupSwipeHandlers() {
   let touch = null;
 
   document.addEventListener('touchstart', e => {
+    if (e.target.closest('.drag-handle')) return;
     const item = e.target.closest('.workout-item');
     if (!item) return;
-    touch = {
-      el:       item,
-      startX:   e.touches[0].clientX,
-      startY:   e.touches[0].clientY,
-      swiping:  false,
-      triggered: false,
-    };
+    touch = { el: item, startX: e.touches[0].clientX, startY: e.touches[0].clientY, swiping: false };
   }, { passive: true });
 
   document.addEventListener('touchmove', e => {
-    if (!touch || touch.triggered) return;
+    if (!touch) return;
     const dx = e.touches[0].clientX - touch.startX;
     const dy = e.touches[0].clientY - touch.startY;
-
-    if (!touch.swiping && Math.abs(dx) > 8) {
-      touch.swiping = Math.abs(dx) > Math.abs(dy);
-    }
-    if (touch.swiping && dx > 0) {
-      const clamped = Math.min(dx * 0.6, 80);
-      touch.el.style.setProperty('--swipe-x', `${clamped}px`);
-    }
+    if (!touch.swiping && Math.abs(dx) > 8) touch.swiping = Math.abs(dx) > Math.abs(dy);
+    if (touch.swiping && dx > 0) touch.el.style.setProperty('--swipe-x', `${Math.min(dx*0.6,80)}px`);
   }, { passive: true });
 
   document.addEventListener('touchend', e => {
     if (!touch) return;
     const dx = e.changedTouches[0].clientX - touch.startX;
     const dy = e.changedTouches[0].clientY - touch.startY;
-
     touch.el.style.setProperty('--swipe-x', '0px');
-
     if (touch.swiping && dx > 75 && Math.abs(dx) > Math.abs(dy) * 2) {
-      const checkBtn = touch.el.querySelector('[data-action="toggle"]');
-      if (checkBtn) toggleCompletion(checkBtn.dataset.id);
+      const cb = touch.el.querySelector('[data-action="toggle"]');
+      if (cb) toggleCompletion(cb.dataset.id);
     }
     touch = null;
+  }, { passive: true });
+}
+
+// ─── Drag-to-Reorder ──────────────────────────────────────────────────────────
+
+function setupReorderHandlers() {
+  let drag = null;
+
+  document.addEventListener('touchstart', e => {
+    const handle = e.target.closest('.drag-handle');
+    if (!handle) return;
+    e.preventDefault();
+    const item = handle.closest('.workout-item');
+    if (!item) return;
+    const rect  = item.getBoundingClientRect();
+    const touch = e.touches[0];
+    const ghost = item.cloneNode(true);
+    ghost.classList.add('drag-ghost');
+    ghost.style.cssText = `left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;`;
+    document.body.appendChild(ghost);
+    item.classList.add('drag-src');
+    drag = { item, ghost, day: state.currentDay, workoutId: item.dataset.workoutId, offsetY: touch.clientY - rect.top, overItem: null, overAbove: true };
+  }, { passive: false });
+
+  document.addEventListener('touchmove', e => {
+    if (!drag) return;
+    e.preventDefault();
+    const touchY = e.touches[0].clientY;
+    drag.ghost.style.top = `${touchY - drag.offsetY}px`;
+    document.querySelectorAll('.workout-item:not(.drag-src)').forEach(el => el.classList.remove('drag-over-above','drag-over-below'));
+    let found = null, foundAbove = true;
+    for (const el of document.querySelectorAll('.workout-item:not(.drag-src)')) {
+      const r = el.getBoundingClientRect();
+      if (touchY >= r.top && touchY <= r.bottom) { found = el; foundAbove = touchY < r.top + r.height/2; break; }
+    }
+    if (found) { found.classList.add(foundAbove?'drag-over-above':'drag-over-below'); drag.overItem = found; drag.overAbove = foundAbove; }
+    else drag.overItem = null;
+  }, { passive: false });
+
+  document.addEventListener('touchend', () => {
+    if (!drag) return;
+    drag.ghost.remove(); drag.item.classList.remove('drag-src');
+    document.querySelectorAll('.drag-over-above,.drag-over-below').forEach(el => el.classList.remove('drag-over-above','drag-over-below'));
+    if (drag.overItem && drag.day) {
+      const wk  = state.workouts[drag.day];
+      const fi  = wk.findIndex(w => w.id === drag.workoutId);
+      const tId = drag.overItem.dataset.workoutId;
+      const ti  = wk.findIndex(w => w.id === tId);
+      if (fi !== -1 && ti !== -1 && fi !== ti) {
+        const [moved] = wk.splice(fi, 1);
+        const ni = wk.findIndex(w => w.id === tId);
+        wk.splice(drag.overAbove ? ni : ni+1, 0, moved);
+        saveState(); render(); loadDayImages(drag.day);
+      }
+    }
+    drag = null;
   }, { passive: true });
 }
 
 // ─── Events ───────────────────────────────────────────────────────────────────
 
 document.addEventListener('click', async e => {
-  // Tap overlay background to close
   if (e.target.id === 'modal-overlay') {
     pendingImg = null; editCurrentImg = null; editImgRemoved = false;
-    state.showModal  = false;
-    state.editTarget = null;
-    state.showHistory = false;
-    render();
-    if (state.view === 'day') loadDayImages(state.currentDay);
-    return;
+    state.showModal = false; state.editTarget = null; state.showHistory = false;
+    render(); if (state.view === 'day') loadDayImages(state.currentDay); return;
   }
-
   const btn = e.target.closest('[data-action]');
   if (!btn) return;
 
   switch (btn.dataset.action) {
 
     case 'nav-day':
-      state.view           = 'day';
-      state.currentDay     = btn.dataset.day;
-      state.filterCategory = null;
-      render();
-      window.scrollTo(0, 0);
-      loadDayImages(btn.dataset.day);
+      state.view = 'day'; state.currentDay = btn.dataset.day; state.filterCategory = null;
+      render(); window.scrollTo(0,0); loadDayImages(btn.dataset.day); acquireWakeLock();
       break;
 
     case 'back':
-      state.view       = 'week';
-      state.currentDay = null;
-      state.showModal  = false;
-      state.editTarget = null;
+      state.view = 'week'; state.currentDay = null; state.showModal = false; state.editTarget = null;
       pendingImg = null; editCurrentImg = null; editImgRemoved = false;
-      render();
-      window.scrollTo(0, 0);
+      releaseWakeLock(); render(); window.scrollTo(0,0);
       break;
 
-    case 'toggle':
-      toggleCompletion(btn.dataset.id);
-      break;
+    case 'toggle': toggleCompletion(btn.dataset.id); break;
+    case 'toggle-dark': toggleDarkMode(); break;
+    case 'reset-all': resetAll(); break;
+    case 'reset-day': resetDay(btn.dataset.day); break;
+    case 'complete-all': completeAll(btn.dataset.day); break;
 
-    case 'toggle-dark':
-      toggleDarkMode();
+    case 'expand-workout': {
+      const item = btn.closest('.workout-item');
+      if (!item) break;
+      const wasExpanded = item.classList.contains('expanded');
+      document.querySelectorAll('.workout-item.expanded').forEach(el => el.classList.remove('expanded'));
+      if (!wasExpanded) item.classList.add('expanded');
       break;
+    }
 
-    case 'refresh':
-      fetchSheetData();
-      break;
+    // ── Set / Rep Logging ──────────────────────────────────────────────────────
 
-    case 'reset-all':
-      resetAll();
+    case 'log-set': {
+      const wid     = btn.dataset.workoutId;
+      const repsVal = document.getElementById(`log-reps-${wid}`)?.value.trim();
+      const wtVal   = document.getElementById(`log-weight-${wid}`)?.value.trim();
+      const unitBtn = document.querySelector(`[data-action="toggle-unit"][data-workout-id="${wid}"]`);
+      const unit    = unitBtn?.dataset.unit || getWeightUnit();
+      const reps    = parseInt(repsVal) || 0;
+      const weight  = parseFloat(wtVal) || 0;
+      if (reps <= 0) { document.getElementById(`log-reps-${wid}`)?.focus(); break; }
+      const sets = logSet(wid, reps, weight, unit);
+      const setsEl = document.getElementById(`log-sets-${wid}`);
+      if (setsEl) setsEl.innerHTML = renderSetsList(wid, sets);
+      // Clear reps, keep weight (common: same weight multiple sets)
+      const repsEl = document.getElementById(`log-reps-${wid}`);
+      if (repsEl) { repsEl.value = ''; repsEl.focus(); }
       break;
+    }
 
-    case 'reset-day':
-      resetDay(btn.dataset.day);
+    case 'remove-set': {
+      const wid = btn.dataset.workoutId;
+      const idx = parseInt(btn.dataset.setIndex, 10);
+      const sets = removeSet(wid, idx);
+      const setsEl = document.getElementById(`log-sets-${wid}`);
+      if (setsEl) setsEl.innerHTML = renderSetsList(wid, sets);
       break;
+    }
 
-    case 'complete-all':
-      completeAll(btn.dataset.day);
+    case 'toggle-unit': {
+      const wid     = btn.dataset.workoutId;
+      const newUnit = btn.dataset.unit === 'lbs' ? 'kg' : 'lbs';
+      btn.dataset.unit = newUnit; btn.textContent = newUnit;
+      setWeightUnit(newUnit);
       break;
+    }
+
+    // ── Timer ──────────────────────────────────────────────────────────────────
+
+    case 'timer-expand':
+      timer.expanded = !timer.expanded; replaceTimerCard(); break;
+    case 'timer-toggle':
+      timer.running ? pauseTimer() : startTimer(); break;
+    case 'timer-preset': setTimerPreset(Number(btn.dataset.seconds)); break;
+    case 'timer-reset':  resetTimer(); break;
+
+    // ── Workout modal ──────────────────────────────────────────────────────────
 
     case 'show-modal':
       pendingImg = null; editCurrentImg = null; editImgRemoved = false;
-      state.showModal  = 'add';
-      state.editTarget = null;
-      render();
-      break;
+      state.showModal = 'add'; state.editTarget = null; render(); break;
 
     case 'close-modal':
       pendingImg = null; editCurrentImg = null; editImgRemoved = false;
-      state.showModal  = false;
-      state.editTarget = null;
-      render();
-      if (state.view === 'day') loadDayImages(state.currentDay);
-      break;
+      state.showModal = false; state.editTarget = null; render();
+      if (state.view === 'day') loadDayImages(state.currentDay); break;
 
     case 'pick-modal-image': {
-      const dataURL = await pickImage();
-      if (!dataURL) return;
-      pendingImg = { dataURL };
-      editImgRemoved = false;
-      render();
-      break;
+      const dataURL = await pickImage(); if (!dataURL) return;
+      pendingImg = { dataURL }; editImgRemoved = false; render(); break;
     }
-
     case 'remove-modal-image':
-      pendingImg = null;
-      editCurrentImg = null;
-      editImgRemoved = true;
-      render();
-      break;
+      pendingImg = null; editCurrentImg = null; editImgRemoved = true; render(); break;
 
     case 'save-workout': {
-      const name  = document.getElementById('f-name')?.value.trim();
-      const cat   = document.getElementById('f-category')?.value.trim();
-      const notes = document.getElementById('f-notes')?.value.trim();
-      const day   = btn.dataset.day;
+      const name   = document.getElementById('f-name')?.value.trim();
+      const cat    = document.getElementById('f-category')?.value.trim();
+      const notes  = document.getElementById('f-notes')?.value.trim();
+      const day    = btn.dataset.day;
       const isEdit = btn.dataset.edit === 'true';
-
       if (!name) { document.getElementById('f-name')?.focus(); return; }
-
       if (isEdit && state.editTarget) {
-        const { index } = state.editTarget;
-        const originalsCount = state.sheetData.filter(r => r.Day === day).length;
-        const row = state.customEdits[day]?.[index - originalsCount];
-
-        if (pendingImg && row?._imgKey) {
-          await saveImage(row._imgKey, pendingImg.dataURL);
-        } else if (editImgRemoved && row?._imgKey) {
-          await deleteImage(row._imgKey);
-        }
-        editWorkout(day, index, name, cat, notes);
+        const { workoutId } = state.editTarget;
+        const w = (state.workouts[day]||[]).find(x => x.id === workoutId);
+        if (pendingImg && w?._imgKey)       await saveImage(w._imgKey, pendingImg.dataURL);
+        else if (editImgRemoved && w?._imgKey) await deleteImage(w._imgKey);
+        editWorkout(day, workoutId, name, cat, notes);
       } else {
         let imgKey = null;
-        if (pendingImg) {
-          imgKey = uuid();
-          await saveImage(imgKey, pendingImg.dataURL);
-        }
+        if (pendingImg) { imgKey = uuid(); await saveImage(imgKey, pendingImg.dataURL); }
         addWorkout(day, name, cat, notes, imgKey);
       }
-
       pendingImg = null; editCurrentImg = null; editImgRemoved = false;
-      state.showModal  = false;
-      state.editTarget = null;
-      render();
-      loadDayImages(state.currentDay);
-      break;
+      state.showModal = false; state.editTarget = null; render(); loadDayImages(state.currentDay); break;
     }
 
     case 'edit-workout': {
-      const day   = btn.dataset.day;
-      const index = parseInt(btn.dataset.index, 10);
-      const originalsCount = state.sheetData.filter(r => r.Day === day).length;
-      const row   = state.customEdits[day]?.[index - originalsCount];
-      // Pre-load the existing image for display in the modal
-      editCurrentImg  = row?._imgKey ? await getImage(row._imgKey) : null;
-      editImgRemoved  = false;
-      pendingImg      = null;
-      state.showModal  = 'edit';
-      state.editTarget = { day, index };
-      render();
-      break;
+      const day = btn.dataset.day, wid = btn.dataset.workoutId;
+      const w   = (state.workouts[day]||[]).find(x => x.id === wid);
+      editCurrentImg = w?._imgKey ? await getImage(w._imgKey) : null;
+      editImgRemoved = false; pendingImg = null;
+      state.showModal = 'edit'; state.editTarget = { day, workoutId: wid }; render(); break;
     }
 
-    case 'delete-workout': {
-      const day   = btn.dataset.day;
-      const index = parseInt(btn.dataset.index, 10);
-      if (confirm('Delete this custom workout?')) {
-        await deleteCustomWorkout(day, index);
-      }
-      break;
-    }
+    case 'delete-workout':
+      if (confirm('Delete this workout?')) await deleteWorkout(btn.dataset.day, btn.dataset.workoutId); break;
 
     case 'add-image': {
-      const imgKey  = btn.dataset.imgKey;
-      const dataURL = await pickImage();
+      const imgKey = btn.dataset.imgKey, dataURL = await pickImage();
       if (!dataURL) return;
       await saveImage(imgKey, dataURL);
       const imgEl = document.querySelector(`img[data-img-key="${CSS.escape(imgKey)}"]`);
-      if (imgEl) {
-        imgEl.src = dataURL;
-        imgEl.style.display = '';
-        const label = imgEl.closest('.workout-body')?.querySelector('.photo-btn-label');
-        if (label) label.textContent = 'Change Photo';
-      }
+      if (imgEl) { imgEl.src = dataURL; imgEl.style.display = ''; const l = imgEl.closest('.workout-body')?.querySelector('.photo-btn-label'); if(l) l.textContent='Change Photo'; }
       break;
     }
 
-    case 'view-image': {
-      const src = btn.getAttribute('src');
-      if (src) showImageViewer(src);
-      break;
+    case 'view-image': { const src = btn.getAttribute('src'); if (src) showImageViewer(src); break; }
+
+    // ── Day management ─────────────────────────────────────────────────────────
+
+    case 'show-add-day': state.showModal = 'add-day'; state.editTarget = null; render(); break;
+    case 'save-day': {
+      const n = document.getElementById('f-day-name')?.value;
+      if (addDay(n)) { state.showModal = false; state.editTarget = null; render(); } break;
+    }
+    case 'edit-day': state.showModal = 'edit-day'; state.editTarget = { day: btn.dataset.day }; render(); break;
+    case 'save-rename-day': {
+      renameDay(btn.dataset.day, document.getElementById('f-day-name')?.value);
+      state.showModal = false; state.editTarget = null; render();
+      if (state.view === 'day') loadDayImages(state.currentDay); break;
+    }
+    case 'delete-day':
+      state.showModal = false; state.editTarget = null; await deleteDay(btn.dataset.day); break;
+
+    case 'duplicate-day': {
+      state.showModal = false; state.editTarget = null;
+      const newName = await duplicateDay(btn.dataset.day);
+      render();
+      // Navigate into the new day
+      state.view = 'day'; state.currentDay = newName; state.filterCategory = null;
+      render(); window.scrollTo(0,0); loadDayImages(newName); acquireWakeLock(); break;
     }
 
-    case 'filter':
-      state.filterCategory = btn.dataset.cat || null;
-      render();
-      loadDayImages(state.currentDay);
-      break;
+    // ── Filter ─────────────────────────────────────────────────────────────────
+    case 'filter': state.filterCategory = btn.dataset.cat||null; render(); loadDayImages(state.currentDay); break;
 
-    case 'timer-toggle':
-      timer.running ? pauseTimer() : startTimer();
-      break;
+    // ── History ────────────────────────────────────────────────────────────────
+    case 'show-history':  state.showHistory = true;  render(); break;
+    case 'close-history': state.showHistory = false; render(); break;
 
-    case 'timer-preset':
-      setTimerPreset(Number(btn.dataset.seconds));
-      break;
-
-    case 'timer-reset':
-      resetTimer();
-      break;
-
-    case 'show-history':
-      state.showHistory = true;
-      render();
-      break;
-
-    case 'close-history':
-      state.showHistory = false;
-      render();
-      break;
-
-    case 'export':
-      exportData();
-      break;
-
-    case 'import':
-      triggerImport();
-      break;
+    case 'export': exportData(); break;
+    case 'import': triggerImport(); break;
+    case 'drag-noop': break;
   }
 });
 
@@ -1192,15 +1352,10 @@ document.addEventListener('keydown', e => {
     document.getElementById('img-viewer')?.remove();
     if (state.showModal) {
       pendingImg = null; editCurrentImg = null; editImgRemoved = false;
-      state.showModal  = false;
-      state.editTarget = null;
-      render();
+      state.showModal = false; state.editTarget = null; render();
       if (state.view === 'day') loadDayImages(state.currentDay);
     }
-    if (state.showHistory) {
-      state.showHistory = false;
-      render();
-    }
+    if (state.showHistory) { state.showHistory = false; render(); }
   }
 });
 
@@ -1208,8 +1363,7 @@ document.addEventListener('keydown', e => {
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('./sw.js')
-      .catch(err => console.warn('Service worker registration failed:', err));
+    navigator.serviceWorker.register('./sw.js').catch(e => console.warn('SW failed:', e));
   });
 }
 
@@ -1218,5 +1372,5 @@ if ('serviceWorker' in navigator) {
 loadState();
 applyTheme();
 render();
-fetchSheetData();
 setupSwipeHandlers();
+setupReorderHandlers();
