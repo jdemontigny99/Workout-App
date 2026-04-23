@@ -34,7 +34,7 @@ let editCurrentImgURL = null;   // URL of existing URL image (edit mode)
 let editImgRemoved    = false;
 let showURLInput        = false;  // show URL text field in modal
 let imageSearchResults  = null;   // null | [] | [{url,name,score}] — image picker state
-let modalFormCache      = null;   // { name, cat, notes } preserved across async renders
+let modalFormCache      = null;   // { name, category, notes } preserved across async renders
 let _deferredInstallPrompt = null; // BeforeInstallPromptEvent
 let _undoPendingSet   = null;   // { workoutId, setIndex, setData, timeoutId }
 let _toastTimeout     = null;
@@ -1128,7 +1128,7 @@ function renderDayView() {
           ${notes}
           <img class="workout-img" data-img-key="${esc(w._imgKey)}"
                src="${esc(w._imgURL || '')}" alt="Exercise photo" data-action="view-image"
-               style="${w._imgURL ? '' : 'display:none'}" crossorigin="anonymous">
+               style="${w._imgURL ? '' : 'display:none'}">
           <button class="photo-btn" data-action="add-image"
                   data-day="${esc(day)}" data-workout-id="${esc(w.id)}" data-img-key="${esc(w._imgKey)}">
             ${ICONS.camera}<span class="photo-btn-label">${(w._imgURL) ? 'Change Photo' : 'Add Photo'}</span>
@@ -1259,7 +1259,7 @@ function renderWorkoutModal() {
     const showUrlEdit = !!(imgURL); // has a URL source
     imgSection = `
       <div class="img-upload-has-image">
-        <img src="${esc(imgSrc)}" class="img-upload-preview" alt="Preview" crossorigin="anonymous">
+        <img src="${esc(imgSrc)}" class="img-upload-preview" alt="Preview">
         ${showUrlEdit ? `
         <div class="img-url-source-row">
           <input id="img-source-url" class="img-url-source-input" type="url"
@@ -1295,7 +1295,8 @@ function renderWorkoutModal() {
           ${imageSearchResults.map((r, i) => `
             <button type="button" class="img-search-result"
                     data-action="pick-search-result" data-index="${i}">
-              <img src="${esc(r.url)}" alt="${esc(r.name)}" loading="lazy" crossorigin="anonymous">
+              <img src="${esc(r.url)}" alt="${esc(r.name)}" loading="lazy"
+                   onerror="this.closest('.img-search-result').style.display='none'">
               <span class="img-search-result-name">${esc(r.name)}</span>
             </button>`).join('')}
         </div>
@@ -1654,7 +1655,7 @@ document.addEventListener('click', async e => {
       const cat   = document.getElementById('f-category')?.value.trim() || '';
       const notes = document.getElementById('f-notes')?.value.trim()    || '';
       // Keep modalFormCache set while URL input is visible so cancel can restore it
-      modalFormCache = { name, cat, notes };
+      modalFormCache = { name, category: cat, notes };
       showURLInput = true; render(); break;
     }
     case 'cancel-url-input': {
@@ -1665,11 +1666,11 @@ document.addEventListener('click', async e => {
       const url   = document.getElementById('img-url-field')?.value.trim();
       const modal = btn.closest('.modal');
       const name  = modal?.querySelector('#f-name')?.value.trim()     || modalFormCache?.name  || '';
-      const cat   = modal?.querySelector('#f-category')?.value.trim() || modalFormCache?.cat   || '';
-      const notes = modal?.querySelector('#f-notes')?.value.trim()    || modalFormCache?.notes || '';
+      const cat   = modal?.querySelector('#f-category')?.value.trim() || modalFormCache?.category || '';
+      const notes = modal?.querySelector('#f-notes')?.value.trim()    || modalFormCache?.notes    || '';
       if (!url) { document.getElementById('img-url-field')?.focus(); break; }
       pendingImgURL = url; pendingImg = null; editImgRemoved = false;
-      modalFormCache = { name, cat, notes };
+      modalFormCache = { name, category: cat, notes };
       showURLInput = false; render(); modalFormCache = null;
       // Background-cache the image so it works offline
       const tmpKey = state.editTarget
@@ -1688,7 +1689,7 @@ document.addEventListener('click', async e => {
       const notes = modal?.querySelector('#f-notes')?.value.trim()    || '';
       if (!url) break;
       pendingImgURL = url; pendingImg = null; editImgRemoved = false;
-      modalFormCache = { name, cat, notes };
+      modalFormCache = { name, category: cat, notes };
       render(); modalFormCache = null;
       const tmpKey = state.editTarget
         ? (state.workouts[state.editTarget.day]||[]).find(x=>x.id===state.editTarget.workoutId)?._imgKey
@@ -1703,7 +1704,7 @@ document.addEventListener('click', async e => {
       const cat   = document.getElementById('f-category')?.value.trim() || '';
       const notes = document.getElementById('f-notes')?.value.trim()    || '';
       if (!name) { document.getElementById('f-name')?.focus(); break; }
-      modalFormCache = { name, cat, notes };
+      modalFormCache = { name, category: cat, notes };
 
       // Show spinner in-place while fetching
       const imgCard = btn.closest('.form-card');
@@ -1722,9 +1723,15 @@ document.addEventListener('click', async e => {
       const idx    = parseInt(btn.dataset.index, 10);
       const result = imageSearchResults?.[idx];
       if (result) {
+        // Preserve form values — modalFormCache was cleared after the grid rendered
+        modalFormCache = {
+          name:     document.getElementById('f-name')?.value.trim()     || modalFormCache?.name     || '',
+          category: document.getElementById('f-category')?.value.trim() || modalFormCache?.category || '',
+          notes:    document.getElementById('f-notes')?.value.trim()    || modalFormCache?.notes    || '',
+        };
         pendingImgURL = result.url; pendingImg = null; editImgRemoved = false;
         imageSearchResults = null;
-        render();
+        render(); modalFormCache = null;
         // Background-cache for edit mode (add mode handled in save-workout)
         if (state.editTarget) {
           const tmpKey = (state.workouts[state.editTarget.day]||[])
@@ -1736,7 +1743,13 @@ document.addEventListener('click', async e => {
     }
 
     case 'cancel-img-search':
-      imageSearchResults = null; render(); break;
+      // Preserve form values — modalFormCache was cleared after the grid rendered
+      modalFormCache = {
+        name:     document.getElementById('f-name')?.value.trim()     || modalFormCache?.name     || '',
+        category: document.getElementById('f-category')?.value.trim() || modalFormCache?.category || '',
+        notes:    document.getElementById('f-notes')?.value.trim()    || modalFormCache?.notes    || '',
+      };
+      imageSearchResults = null; render(); modalFormCache = null; break;
 
     case 'save-workout': {
       const name   = document.getElementById('f-name')?.value.trim();
