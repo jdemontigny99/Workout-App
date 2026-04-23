@@ -27,9 +27,16 @@ const state = {
   showHistory:    false,
 };
 
-let pendingImg      = null;
-let editCurrentImg  = null;
-let editImgRemoved  = false;
+let pendingImg        = null;   // { dataURL } — uploaded file
+let pendingImgURL     = null;   // string — pasted or auto-found URL
+let editCurrentImg    = null;   // base64 of existing local image (edit mode)
+let editCurrentImgURL = null;   // URL of existing URL image (edit mode)
+let editImgRemoved    = false;
+let showURLInput      = false;  // show URL text field in modal
+let modalFormCache    = null;   // { name, cat, notes } preserved across async renders
+let _deferredInstallPrompt = null; // BeforeInstallPromptEvent
+let _undoPendingSet   = null;   // { workoutId, setIndex, setData, timeoutId }
+let _toastTimeout     = null;
 
 // ─── Timer ────────────────────────────────────────────────────────────────────
 
@@ -163,7 +170,10 @@ function loadState() {
     : window.matchMedia('(prefers-color-scheme: dark)').matches;
 
   const comp = localStorage.getItem(KEYS.completed);
-  state.completedIDs = comp ? new Set(JSON.parse(comp)) : new Set();
+  try {
+    const parsed = comp ? JSON.parse(comp) : [];
+    state.completedIDs = new Set(Array.isArray(parsed) ? parsed : []);
+  } catch { state.completedIDs = new Set(); }
 
   const savedDays = localStorage.getItem(KEYS.days);
   state.days = savedDays ? JSON.parse(savedDays) : [...DEFAULT_DAYS];
@@ -176,10 +186,23 @@ function loadState() {
 }
 
 function saveState() {
-  localStorage.setItem(KEYS.completed, JSON.stringify([...state.completedIDs]));
-  localStorage.setItem(KEYS.days,      JSON.stringify(state.days));
-  localStorage.setItem(KEYS.workouts,  JSON.stringify(state.workouts));
-  localStorage.setItem(KEYS.dark,      String(state.isDarkMode));
+  try {
+    localStorage.setItem(KEYS.completed, JSON.stringify([...state.completedIDs]));
+    localStorage.setItem(KEYS.days,      JSON.stringify(state.days));
+    localStorage.setItem(KEYS.workouts,  JSON.stringify(state.workouts));
+    localStorage.setItem(KEYS.dark,      String(state.isDarkMode));
+  } catch (e) {
+    if (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED') {
+      showToast('Storage full — old logs trimmed to free space.', { duration: 5000 });
+      pruneOldLogs();
+      try { // retry once after pruning
+        localStorage.setItem(KEYS.completed, JSON.stringify([...state.completedIDs]));
+        localStorage.setItem(KEYS.days,      JSON.stringify(state.days));
+        localStorage.setItem(KEYS.workouts,  JSON.stringify(state.workouts));
+        localStorage.setItem(KEYS.dark,      String(state.isDarkMode));
+      } catch (_) {}
+    }
+  }
 }
 
 // ─── Set / Rep Logs ───────────────────────────────────────────────────────────
@@ -187,21 +210,37 @@ function saveState() {
 function loadLogs() {
   try { return JSON.parse(localStorage.getItem(KEYS.logs) || '{}'); } catch { return {}; }
 }
-function saveLogs(logs) { localStorage.setItem(KEYS.logs, JSON.stringify(logs)); }
+function saveLogs(logs) {
+  try { localStorage.setItem(KEYS.logs, JSON.stringify(logs)); }
+  catch (e) {
+    if (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED') {
+      showToast('Storage full — trimming old logs.', { duration: 5000 });
+      pruneOldLogs();
+      try { localStorage.setItem(KEYS.logs, JSON.stringify(logs)); } catch (_) {}
+    }
+  }
+}
+
+function pruneOldLogs() {
+  const logs = loadLogs();
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - 90);
+  const cutoffKey = cutoff.toISOString().split('T')[0];
+  const pruned = Object.fromEntries(Object.entries(logs).filter(([k]) => k >= cutoffKey));
+  if (Object.keys(pruned).length !== Object.keys(logs).length) saveLogs(pruned);
+}
 function getTodayKey()  { return new Date().toISOString().split('T')[0]; }
 
 function getWeightUnit() { return localStorage.getItem(KEYS.unit) || 'lbs'; }
 function setWeightUnit(u) { localStorage.setItem(KEYS.unit, u); }
 
-function getTodaySets(workoutId) {
-  return loadLogs()[getTodayKey()]?.[workoutId] || [];
+function getTodaySets(workoutId, logs = loadLogs(), todayKey = getTodayKey()) {
+  return logs[todayKey]?.[workoutId] || [];
 }
 
-function getLastSessionLog(workoutId) {
-  const logs  = loadLogs();
-  const today = getTodayKey();
+function getLastSessionLog(workoutId, logs = loadLogs(), todayKey = getTodayKey()) {
   for (const date of Object.keys(logs).sort().reverse()) {
-    if (date >= today) continue;
+    if (date >= todayKey) continue;
     if (logs[date][workoutId]?.length > 0) return { date, sets: logs[date][workoutId] };
   }
   return null;
@@ -227,7 +266,8 @@ function removeSet(workoutId, setIndex) {
 }
 
 function formatSet(s) {
-  const w = s.weight > 0 ? `${s.weight}${s.unit} × ` : '';
+  const unit = s.unit || 'lbs';
+  const w = s.weight > 0 ? `${s.weight}${unit} × ` : '';
   return `${w}${s.reps} rep${s.reps !== 1 ? 's' : ''}`;
 }
 
@@ -237,7 +277,8 @@ function formatLastSession(last) {
   const label = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
   const sets  = last.sets;
   const first = sets[0];
-  const wPart = first.weight > 0 ? ` @ ${first.weight}${first.unit}` : '';
+  const unit  = first.unit || 'lbs';
+  const wPart = first.weight > 0 ? ` @ ${first.weight}${unit}` : '';
   const summary = `${sets.length}×${first.reps}${wPart}`;
   return `${summary} · ${label}`;
 }
@@ -253,9 +294,9 @@ function renderSetsList(workoutId, sets) {
     </div>`).join('');
 }
 
-function renderLogSection(workoutId) {
-  const todaySets  = getTodaySets(workoutId);
-  const lastSess   = getLastSessionLog(workoutId);
+function renderLogSection(workoutId, logs = loadLogs(), todayKey = getTodayKey()) {
+  const todaySets  = getTodaySets(workoutId, logs, todayKey);
+  const lastSess   = getLastSessionLog(workoutId, logs, todayKey);
   const lastLabel  = formatLastSession(lastSess);
   const unit       = getWeightUnit();
 
@@ -397,17 +438,24 @@ function resetDay(day) {
   saveState(); saveWeekSnapshot(); render(); loadDayImages(day);
 }
 
-function addWorkout(day, name, category, notes, imgKey) {
+function addWorkout(day, name, category, notes, imgKey, imgURL) {
   if (!state.workouts[day]) state.workouts[day] = [];
   const id = uuid();
-  state.workouts[day].push({ id, Day: day, Workout: name, Category: category || null, Notes: notes || null, _imgKey: imgKey || id });
+  state.workouts[day].push({ id, Day: day, Workout: name, Category: category || null, Notes: notes || null, _imgKey: imgKey || id, _imgURL: imgURL || null });
   saveState();
 }
 
-function editWorkout(day, workoutId, name, category, notes) {
+function editWorkout(day, workoutId, name, category, notes, newImgURL, clearImgURL) {
   const idx = (state.workouts[day] || []).findIndex(w => w.id === workoutId);
   if (idx === -1) return;
-  state.workouts[day][idx] = { ...state.workouts[day][idx], Workout: name, Category: category || null, Notes: notes || null };
+  const prev = state.workouts[day][idx];
+  state.workouts[day][idx] = {
+    ...prev,
+    Workout:  name,
+    Category: category || null,
+    Notes:    notes    || null,
+    _imgURL:  clearImgURL ? null : (newImgURL !== undefined ? newImgURL : prev._imgURL),
+  };
   saveState();
 }
 
@@ -420,7 +468,12 @@ async function deleteWorkout(day, workoutId) {
   if (row._imgKey) await deleteImage(row._imgKey);
   workouts.splice(idx, 1);
   state.completedIDs.delete(workoutId);
-  saveState(); render(); loadDayImages(day);
+  saveState(); saveWeekSnapshot();
+  // Clear stale filter if the deleted workout was the last one in the active category
+  if (state.filterCategory && !getCategories(day).includes(state.filterCategory)) {
+    state.filterCategory = null;
+  }
+  render(); loadDayImages(day);
 }
 
 function addDay(name) {
@@ -450,7 +503,7 @@ async function deleteDay(day) {
   }
   state.days = state.days.filter(d => d !== day);
   delete state.workouts[day];
-  saveState();
+  saveState(); saveWeekSnapshot();
   if (state.currentDay === day) { state.view = 'week'; state.currentDay = null; state.showModal = false; state.editTarget = null; }
   render();
 }
@@ -592,6 +645,7 @@ async function importData(file) {
     state.completedIDs = new Set(data.completedIDs || []);
     if (data.weekHistory) localStorage.setItem(KEYS.history, JSON.stringify(data.weekHistory));
     if (data.logs)        saveLogs(data.logs);
+    pruneOldLogs();
     saveState();
     alert('Import successful! Note: exercise photos are not included in backups.');
     render();
@@ -647,6 +701,10 @@ const ICONS = {
   dotsVertical: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="18" height="18"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>`,
   dragHandle:   `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="18" height="18"><rect x="4" y="6" width="16" height="2" rx="1"/><rect x="4" y="11" width="16" height="2" rx="1"/><rect x="4" y="16" width="16" height="2" rx="1"/></svg>`,
   flame:        `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="13" height="13"><path d="M12 2C9 6 7 8.5 7 12a5 5 0 0 0 10 0c0-2.5-1-4.5-2-6-1 2-1.5 2.5-2 3-.5-.5-1-2-1-4z" opacity=".8"/><path d="M12 8c-.5 2-.8 3-2 4a3 3 0 0 0 6 0c0-1.5-.5-2.5-1-3.5-.5 1-.8 1.5-1.5 1.5C13 9.5 12.5 9 12 8z"/></svg>`,
+  link:         `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="15" height="15"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`,
+  sparkle:      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="15" height="15"><path d="M12 2l1.5 4.5L18 8l-4.5 1.5L12 14l-1.5-4.5L6 8l4.5-1.5L12 2z"/><path d="M19 14l.75 2.25L22 17l-2.25.75L19 20l-.75-2.25L16 17l2.25-.75L19 14z" opacity=".6"/></svg>`,
+  install:      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><path d="M12 2v13"/><path d="M7 10l5 5 5-5"/><rect x="2" y="17" width="20" height="5" rx="1"/></svg>`,
+  copyTo:       `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="15" height="15"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M12 12v4"/><path d="M10 14l2 2 2-2"/></svg>`,
 };
 
 // ─── HTML Helpers ─────────────────────────────────────────────────────────────
@@ -654,6 +712,124 @@ const ICONS = {
 function esc(s) {
   if (s == null) return '';
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ─── Toast Notifications ─────────────────────────────────────────────────────
+
+function showToast(msg, opts = {}) {
+  document.getElementById('app-toast')?.remove();
+  clearTimeout(_toastTimeout);
+
+  const toast = document.createElement('div');
+  toast.id = 'app-toast';
+  toast.className = 'toast';
+
+  const msgEl = document.createElement('span');
+  msgEl.className = 'toast-msg';
+  msgEl.textContent = msg;
+  toast.appendChild(msgEl);
+
+  if (opts.undo) {
+    const undoBtn = document.createElement('button');
+    undoBtn.className = 'toast-undo-btn';
+    undoBtn.textContent = 'Undo';
+    undoBtn.addEventListener('click', () => {
+      clearTimeout(_toastTimeout);
+      toast.remove();
+      opts.undo();
+    });
+    toast.appendChild(undoBtn);
+  }
+
+  document.body.appendChild(toast);
+  requestAnimationFrame(() => toast.classList.add('toast-visible'));
+
+  _toastTimeout = setTimeout(() => {
+    toast.classList.remove('toast-visible');
+    setTimeout(() => toast.remove(), 300);
+  }, opts.duration ?? 4000);
+}
+
+// ─── Auto-find Image ──────────────────────────────────────────────────────────
+// Primary: wger.de exercise database (purpose-built, reliable demo photos)
+// Fallback: Wikipedia
+
+async function fetchExerciseImage(name) {
+  const term = name.trim();
+
+  // ── 1. wger.de exercise database ────────────────────────────────────────────
+  try {
+    const q = encodeURIComponent(term);
+    const searchRes = await fetch(
+      `https://wger.de/api/v2/exercise/search/?term=${q}&language=english&format=json`,
+      { signal: AbortSignal.timeout(5000) }
+    );
+    if (searchRes.ok) {
+      const data    = await searchRes.json();
+      const hit     = data.suggestions?.[0];
+      const baseId  = hit?.data?.base_id;
+      if (baseId) {
+        const imgRes  = await fetch(`https://wger.de/api/v2/exerciseimage/?exercise_base=${baseId}&format=json`,
+          { signal: AbortSignal.timeout(5000) });
+        const imgData = await imgRes.json();
+        const imgs    = imgData.results || [];
+        const img     = imgs.find(i => i.is_main) || imgs[0];
+        if (img?.image) return img.image;
+      }
+    }
+  } catch {}
+
+  // ── 2. Wikipedia fallback ────────────────────────────────────────────────────
+  try {
+    const q = encodeURIComponent(term + ' exercise');
+    const searchRes  = await fetch(`https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${q}&format=json&origin=*&srlimit=5`);
+    const searchData = await searchRes.json();
+    const results    = searchData.query?.search || [];
+    for (const result of results) {
+      const title   = encodeURIComponent(result.title);
+      const imgRes  = await fetch(`https://en.wikipedia.org/w/api.php?action=query&titles=${title}&prop=pageimages&format=json&pithumbsize=1200&origin=*`);
+      const imgData = await imgRes.json();
+      const page    = Object.values(imgData.query.pages)[0];
+      if (page?.thumbnail?.source) return page.thumbnail.source;
+    }
+  } catch {}
+
+  return null;
+}
+
+// ─── Fetch URL → compress → store in IndexedDB ────────────────────────────────
+// Returns true if the image was successfully cached locally.
+async function fetchAndCacheImage(url, imgKey) {
+  try {
+    const resp = await fetch(url, { mode: 'cors', signal: AbortSignal.timeout(8000) });
+    if (!resp.ok) return false;
+    const blob = await resp.blob();
+    if (!blob.type.startsWith('image/')) return false;
+
+    // Blob → data URL → compress via canvas
+    const raw = await new Promise((res, rej) => {
+      const r = new FileReader();
+      r.onload = e => res(e.target.result);
+      r.onerror = rej;
+      r.readAsDataURL(blob);
+    });
+    const compressed = await new Promise(res => {
+      const img = new Image();
+      img.onload = () => {
+        let w = img.naturalWidth, h = img.naturalHeight;
+        const max = 1200;
+        if (w > max) { h = Math.round(h * max / w); w = max; }
+        const c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        c.getContext('2d').drawImage(img, 0, 0, w, h);
+        res(c.toDataURL('image/jpeg', 0.82));
+      };
+      img.onerror = () => res(raw);
+      img.src = raw;
+    });
+    await saveImage(imgKey, compressed);
+    return true;
+  } catch { return false; }
 }
 
 // ─── Render: Week View ────────────────────────────────────────────────────────
@@ -712,6 +888,7 @@ function renderWeekView() {
       <header class="app-header">
         <h1 class="app-title">Workout Tracker</h1>
         <div class="header-actions">
+          ${_deferredInstallPrompt ? `<button class="icon-btn" data-action="install-pwa" title="Install app">${ICONS.install}</button>` : ''}
           <button class="icon-btn" data-action="show-history" title="History">${ICONS.history}</button>
           <button class="icon-btn" data-action="toggle-dark"  title="Toggle dark mode">
             ${state.isDarkMode ? ICONS.sun : ICONS.moon}
@@ -839,12 +1016,47 @@ function renderEditDayModal() {
     </div>`;
 }
 
+// ─── Render: Copy Workout Sheet ──────────────────────────────────────────────
+
+function renderCopyWorkoutSheet() {
+  const { day, workoutId } = state.editTarget || {};
+  const w = (state.workouts[day]||[]).find(x => x.id === workoutId);
+  const otherDays = state.days.filter(d => d !== day);
+  const dayBtns = otherDays.length
+    ? otherDays.map((d, i) => `
+        ${i > 0 ? '<div class="form-divider"></div>' : ''}
+        <button type="button" class="list-btn blue" data-action="confirm-copy-workout"
+                data-day="${esc(d)}">${esc(d)}</button>`).join('')
+    : '<div class="empty-state">No other training days to copy to.</div>';
+
+  return `
+    <div class="modal-overlay" id="modal-overlay">
+      <div class="modal" role="dialog" aria-modal="true">
+        <div class="modal-header">
+          <button class="modal-cancel" data-action="close-modal">Cancel</button>
+          <span class="modal-title">Copy to…</span>
+          <div style="min-width:52px"></div>
+        </div>
+        <div class="modal-form">
+          <div class="form-section">
+            <label class="form-label">Copy "${esc(w?.Workout||'')}" to</label>
+            <div class="form-card">${dayBtns}</div>
+          </div>
+        </div>
+      </div>
+    </div>`;
+}
+
 // ─── Render: Day View ─────────────────────────────────────────────────────────
 
 function renderDayView() {
   const day        = state.currentDay;
   const workouts   = state.workouts[day] || [];
   const categories = getCategories(day);
+
+  // Load logs once for the whole render — passed down to each renderLogSection
+  const _logs     = loadLogs();
+  const _todayKey = getTodayKey();
 
   const filtered = state.filterCategory
     ? workouts.filter(w => w.Category === state.filterCategory)
@@ -869,16 +1081,18 @@ function renderDayView() {
           </div>
           ${notes}
           <img class="workout-img" data-img-key="${esc(w._imgKey)}"
-               src="" alt="Exercise photo" data-action="view-image" style="display:none">
+               src="${esc(w._imgURL || '')}" alt="Exercise photo" data-action="view-image"
+               style="${w._imgURL ? '' : 'display:none'}" crossorigin="anonymous">
           <button class="photo-btn" data-action="add-image"
                   data-day="${esc(day)}" data-workout-id="${esc(w.id)}" data-img-key="${esc(w._imgKey)}">
-            ${ICONS.camera}<span class="photo-btn-label">Add Photo</span>
+            ${ICONS.camera}<span class="photo-btn-label">${(w._imgURL) ? 'Change Photo' : 'Add Photo'}</span>
           </button>
-          ${renderLogSection(w.id)}
+          ${renderLogSection(w.id, _logs, _todayKey)}
         </div>
         <button class="workout-more-btn" data-action="expand-workout"
                 data-workout-id="${esc(w.id)}" aria-label="More options">${ICONS.dotsVertical}</button>
         <div class="workout-actions">
+          <button class="copy-btn"   data-action="copy-workout"   data-day="${esc(day)}" data-workout-id="${esc(w.id)}" title="Copy to day">${ICONS.copyTo}</button>
           <button class="edit-btn"   data-action="edit-workout"   data-day="${esc(day)}" data-workout-id="${esc(w.id)}" title="Edit">${ICONS.edit}</button>
           <button class="delete-btn" data-action="delete-workout" data-day="${esc(day)}" data-workout-id="${esc(w.id)}" title="Delete">${ICONS.trash}</button>
         </div>
@@ -891,7 +1105,9 @@ function renderDayView() {
         ${categories.map(c=>`<button class="filter-pill${state.filterCategory===c?' active':''}" data-action="filter" data-cat="${esc(c)}">${esc(c)}</button>`).join('')}
        </div>` : '';
 
-  const modalHTML = state.showModal==='add'||state.showModal==='edit' ? renderWorkoutModal() : '';
+  const modalHTML = state.showModal==='add'||state.showModal==='edit' ? renderWorkoutModal()
+                 : state.showModal==='copy-workout' ? renderCopyWorkoutSheet()
+                 : '';
 
   return `
     <div class="view day-view">
@@ -910,7 +1126,9 @@ function renderDayView() {
           <button class="complete-all-btn" data-action="complete-all" data-day="${esc(day)}">${ICONS.checkAll} Complete All</button>
         </div>
         ${filterPills}
-        <div class="card">${items || '<div class="empty-state">No workouts yet — tap + to add your first one.</div>'}</div>
+        <div class="card">${items || (state.filterCategory
+          ? `<div class="empty-state">No workouts in "${esc(state.filterCategory)}" — try a different filter.</div>`
+          : '<div class="empty-state">No workouts yet — tap + to add your first one.</div>')}</div>
       </div>
       <button class="fab" data-action="show-modal" aria-label="Add workout">${ICONS.plusSimple}</button>
     </div>
@@ -970,7 +1188,10 @@ function renderWorkoutModal() {
   const isEdit = state.showModal === 'edit';
   let prefill  = { name: '', category: '', notes: '' };
 
-  if (isEdit && state.editTarget) {
+  // Use cached form values (preserved across async auto-find renders)
+  if (modalFormCache) {
+    prefill = modalFormCache;
+  } else if (isEdit && state.editTarget) {
     const { day, workoutId } = state.editTarget;
     const w = (state.workouts[day]||[]).find(x => x.id === workoutId);
     if (w) { prefill.name = w.Workout||''; prefill.category = w.Category||''; prefill.notes = w.Notes||''; }
@@ -981,15 +1202,51 @@ function renderWorkoutModal() {
     ? `<datalist id="category-list">${allCats.map(c=>`<option value="${esc(c)}">`).join('')}</datalist>`
     : '';
 
-  const imgDataURL = pendingImg?.dataURL || (!editImgRemoved ? editCurrentImg : null);
-  const imgSection = imgDataURL
-    ? `<div class="img-upload-has-image">
-         <img src="${esc(imgDataURL)}" class="img-upload-preview" alt="Preview">
-         <button type="button" class="img-remove-btn" data-action="remove-modal-image">✕ Remove</button>
-       </div>`
-    : `<div class="img-upload-placeholder" data-action="pick-modal-image">
-         ${ICONS.cameraBig}<span>Tap to add a reference photo</span>
-       </div>`;
+  // Resolve what image to show (upload > URL > existing)
+  const imgDataURL = pendingImg?.dataURL || (!editImgRemoved && !pendingImgURL ? editCurrentImg : null);
+  const imgURL     = pendingImgURL || (!editImgRemoved && !pendingImg ? editCurrentImgURL : null);
+  const imgSrc     = imgDataURL || imgURL;
+
+  let imgSection;
+  if (imgSrc) {
+    // Show editable URL field when image came from a URL (not a local upload)
+    const showUrlEdit = !!(imgURL); // has a URL source
+    imgSection = `
+      <div class="img-upload-has-image">
+        <img src="${esc(imgSrc)}" class="img-upload-preview" alt="Preview" crossorigin="anonymous">
+        ${showUrlEdit ? `
+        <div class="img-url-source-row">
+          <input id="img-source-url" class="img-url-source-input" type="url"
+                 value="${esc(imgURL)}" placeholder="Image URL" autocomplete="off">
+          <button type="button" class="img-url-reload-btn" data-action="reload-img-url"
+                  title="Load new URL">${ICONS.reset}</button>
+        </div>` : ''}
+        <button type="button" class="img-remove-btn" data-action="remove-modal-image">✕ Remove</button>
+      </div>`;
+  } else if (showURLInput) {
+    imgSection = `
+      <div class="img-url-wrap">
+        <input id="img-url-field" class="form-input" type="url"
+               placeholder="https://example.com/photo.jpg" autocomplete="off">
+        <div class="img-url-btns">
+          <button type="button" class="img-url-cancel-btn" data-action="cancel-url-input">Cancel</button>
+          <button type="button" class="img-url-confirm-btn" data-action="confirm-url-input">Use URL</button>
+        </div>
+      </div>`;
+  } else {
+    imgSection = `
+      <div class="img-source-options">
+        <button type="button" class="img-source-btn" data-action="pick-modal-image">
+          ${ICONS.camera}<span>Upload</span>
+        </button>
+        <button type="button" class="img-source-btn" data-action="show-url-input">
+          ${ICONS.link}<span>Paste URL</span>
+        </button>
+        <button type="button" class="img-source-btn" data-action="auto-find-image">
+          ${ICONS.sparkle}<span>Auto-find</span>
+        </button>
+      </div>`;
+  }
 
   return `
     <div class="modal-overlay" id="modal-overlay">
@@ -1035,28 +1292,55 @@ function renderWorkoutModal() {
 function render() {
   const app = document.getElementById('app');
   if (!app) return;
-  app.innerHTML = state.view === 'week' ? renderWeekView() : renderDayView();
-  if (state.showModal) {
-    requestAnimationFrame(() => {
-      const first = document.getElementById('f-day-name') || document.getElementById('f-name');
-      if (first) { first.focus(); first.setSelectionRange(first.value.length, first.value.length); }
-    });
+  try {
+    app.innerHTML = state.view === 'week' ? renderWeekView() : renderDayView();
+    if (state.showModal) {
+      requestAnimationFrame(() => {
+        const first = document.getElementById('f-day-name')
+                   || document.getElementById('img-url-field')
+                   || document.getElementById('f-name');
+        if (first) { first.focus(); first.setSelectionRange?.(first.value.length, first.value.length); }
+      });
+    }
+  } catch (err) {
+    console.error('Render error:', err);
+    app.innerHTML = `
+      <div style="padding:60px 24px;text-align:center;max-width:320px;margin:0 auto">
+        <div style="font-size:40px;margin-bottom:16px">⚠️</div>
+        <div style="font-weight:600;font-size:18px;margin-bottom:8px;color:var(--text)">Something went wrong</div>
+        <div style="color:var(--text-secondary);font-size:14px;margin-bottom:28px">${esc(err?.message||'Unexpected error')}</div>
+        <button onclick="location.reload()"
+          style="background:var(--accent);color:#fff;border:none;border-radius:10px;
+                 padding:12px 28px;font-size:16px;font-family:inherit;cursor:pointer">
+          Reload App
+        </button>
+      </div>`;
   }
 }
 
 // ─── Async Image Loading ──────────────────────────────────────────────────────
 
 async function loadDayImages(day) {
-  for (const w of (state.workouts[day] || [])) {
-    if (!w._imgKey) continue;
-    const dataURL = await getImage(w._imgKey);
-    if (!dataURL) continue;
-    const imgEl = document.querySelector(`img[data-img-key="${CSS.escape(w._imgKey)}"]`);
-    if (!imgEl) continue;
-    imgEl.src = dataURL; imgEl.style.display = '';
+  const workouts = state.workouts[day] || [];
+  // Kick off all DB reads in parallel for faster initial paint
+  await Promise.all(workouts.map(async w => {
+    const imgEl = document.querySelector(`img[data-img-key="${CSS.escape(w._imgKey || '')}"]`);
+    if (!imgEl) return;
+
+    // Prefer locally-stored copy (IndexedDB) over the raw URL
+    const local = w._imgKey ? await getImage(w._imgKey) : null;
+    if (local) {
+      imgEl.src = local; imgEl.style.display = '';
+    } else if (w._imgURL) {
+      // No local copy yet (CORS blocked or first load) — show directly from URL
+      imgEl.src = w._imgURL; imgEl.style.display = '';
+    } else {
+      return; // no image at all
+    }
+
     const label = imgEl.closest('.workout-body')?.querySelector('.photo-btn-label');
     if (label) label.textContent = 'Change Photo';
-  }
+  }));
 }
 
 // ─── Full-Screen Image Viewer ─────────────────────────────────────────────────
@@ -1166,7 +1450,8 @@ function setupReorderHandlers() {
 
 document.addEventListener('click', async e => {
   if (e.target.id === 'modal-overlay') {
-    pendingImg = null; editCurrentImg = null; editImgRemoved = false;
+    pendingImg = null; pendingImgURL = null; editCurrentImg = null; editCurrentImgURL = null;
+    editImgRemoved = false; showURLInput = false; modalFormCache = null;
     state.showModal = false; state.editTarget = null; state.showHistory = false;
     render(); if (state.view === 'day') loadDayImages(state.currentDay); return;
   }
@@ -1181,8 +1466,10 @@ document.addEventListener('click', async e => {
       break;
 
     case 'back':
+      pauseTimer(); // stop interval before leaving day view
       state.view = 'week'; state.currentDay = null; state.showModal = false; state.editTarget = null;
-      pendingImg = null; editCurrentImg = null; editImgRemoved = false;
+      pendingImg = null; pendingImgURL = null; editCurrentImg = null; editCurrentImgURL = null;
+      editImgRemoved = false; showURLInput = false; modalFormCache = null;
       releaseWakeLock(); render(); window.scrollTo(0,0);
       break;
 
@@ -1224,9 +1511,29 @@ document.addEventListener('click', async e => {
     case 'remove-set': {
       const wid = btn.dataset.workoutId;
       const idx = parseInt(btn.dataset.setIndex, 10);
+      // Capture set data before removal for potential undo
+      const logs = loadLogs();
+      const setData = logs[getTodayKey()]?.[wid]?.[idx];
+      // Clear any previous pending undo first (new removal replaces old one)
+      _undoPendingSet = null;
       const sets = removeSet(wid, idx);
       const setsEl = document.getElementById(`log-sets-${wid}`);
       if (setsEl) setsEl.innerHTML = renderSetsList(wid, sets);
+      if (setData) {
+        _undoPendingSet = { workoutId: wid, setIndex: idx, setData };
+        showToast('Set removed', {
+          undo: () => {
+            _undoPendingSet = null;
+            const l = loadLogs(); const today = getTodayKey();
+            if (!l[today]) l[today] = {};
+            if (!l[today][wid]) l[today][wid] = [];
+            l[today][wid].splice(idx, 0, setData);
+            saveLogs(l);
+            const el = document.getElementById(`log-sets-${wid}`);
+            if (el) el.innerHTML = renderSetsList(wid, l[today][wid]);
+          }
+        });
+      }
       break;
     }
 
@@ -1250,20 +1557,109 @@ document.addEventListener('click', async e => {
     // ── Workout modal ──────────────────────────────────────────────────────────
 
     case 'show-modal':
-      pendingImg = null; editCurrentImg = null; editImgRemoved = false;
+      pendingImg = null; pendingImgURL = null; editCurrentImg = null; editCurrentImgURL = null;
+      editImgRemoved = false; showURLInput = false; modalFormCache = null;
       state.showModal = 'add'; state.editTarget = null; render(); break;
 
     case 'close-modal':
-      pendingImg = null; editCurrentImg = null; editImgRemoved = false;
+      pendingImg = null; pendingImgURL = null; editCurrentImg = null; editCurrentImgURL = null;
+      editImgRemoved = false; showURLInput = false; modalFormCache = null;
       state.showModal = false; state.editTarget = null; render();
       if (state.view === 'day') loadDayImages(state.currentDay); break;
 
     case 'pick-modal-image': {
       const dataURL = await pickImage(); if (!dataURL) return;
-      pendingImg = { dataURL }; editImgRemoved = false; render(); break;
+      pendingImg = { dataURL }; pendingImgURL = null; editImgRemoved = false; render(); break;
     }
     case 'remove-modal-image':
-      pendingImg = null; editCurrentImg = null; editImgRemoved = true; render(); break;
+      pendingImg = null; pendingImgURL = null; editCurrentImg = null; editCurrentImgURL = null;
+      editImgRemoved = true; showURLInput = false; render(); break;
+
+    // ── URL image input ────────────────────────────────────────────────────────
+    case 'show-url-input': {
+      // Cache form values so they survive the re-render
+      const name  = document.getElementById('f-name')?.value.trim()     || '';
+      const cat   = document.getElementById('f-category')?.value.trim() || '';
+      const notes = document.getElementById('f-notes')?.value.trim()    || '';
+      // Keep modalFormCache set while URL input is visible so cancel can restore it
+      modalFormCache = { name, cat, notes };
+      showURLInput = true; render(); break;
+    }
+    case 'cancel-url-input': {
+      // modalFormCache still holds the values saved when show-url-input was clicked
+      showURLInput = false; render(); modalFormCache = null; break;
+    }
+    case 'confirm-url-input': {
+      const url   = document.getElementById('img-url-field')?.value.trim();
+      const modal = btn.closest('.modal');
+      const name  = modal?.querySelector('#f-name')?.value.trim()     || modalFormCache?.name  || '';
+      const cat   = modal?.querySelector('#f-category')?.value.trim() || modalFormCache?.cat   || '';
+      const notes = modal?.querySelector('#f-notes')?.value.trim()    || modalFormCache?.notes || '';
+      if (!url) { document.getElementById('img-url-field')?.focus(); break; }
+      pendingImgURL = url; pendingImg = null; editImgRemoved = false;
+      modalFormCache = { name, cat, notes };
+      showURLInput = false; render(); modalFormCache = null;
+      // Background-cache the image so it works offline
+      const tmpKey = state.editTarget
+        ? (state.workouts[state.editTarget.day]||[]).find(x=>x.id===state.editTarget.workoutId)?._imgKey
+        : null;
+      if (tmpKey) fetchAndCacheImage(url, tmpKey).catch(()=>{});
+      break;
+    }
+
+    case 'reload-img-url': {
+      // User edited the URL field on the image preview — reload from new URL
+      const url   = document.getElementById('img-source-url')?.value.trim();
+      const modal = btn.closest('.modal');
+      const name  = modal?.querySelector('#f-name')?.value.trim()     || '';
+      const cat   = modal?.querySelector('#f-category')?.value.trim() || '';
+      const notes = modal?.querySelector('#f-notes')?.value.trim()    || '';
+      if (!url) break;
+      pendingImgURL = url; pendingImg = null; editImgRemoved = false;
+      modalFormCache = { name, cat, notes };
+      render(); modalFormCache = null;
+      const tmpKey = state.editTarget
+        ? (state.workouts[state.editTarget.day]||[]).find(x=>x.id===state.editTarget.workoutId)?._imgKey
+        : null;
+      if (tmpKey) fetchAndCacheImage(url, tmpKey).catch(()=>{});
+      break;
+    }
+
+    // ── Auto-find image ────────────────────────────────────────────────────────
+    case 'auto-find-image': {
+      const name  = document.getElementById('f-name')?.value.trim()     || '';
+      const cat   = document.getElementById('f-category')?.value.trim() || '';
+      const notes = document.getElementById('f-notes')?.value.trim()    || '';
+      if (!name) { document.getElementById('f-name')?.focus(); break; }
+      modalFormCache = { name, cat, notes };
+
+      // Show spinner in-place without re-rendering the whole form
+      const imgCard = btn.closest('.form-card');
+      if (imgCard) imgCard.innerHTML = `
+        <div class="img-auto-loading">
+          <div class="spinner"></div>
+          <span>Searching for "${esc(name)}"…</span>
+        </div>`;
+
+      const url = await fetchExerciseImage(name);
+      if (url) {
+        pendingImgURL = url; pendingImg = null; editImgRemoved = false;
+        // Background-cache for edit mode (add mode is handled in save-workout)
+        if (state.editTarget) {
+          const tmpKey = (state.workouts[state.editTarget.day]||[])
+            .find(x => x.id === state.editTarget.workoutId)?._imgKey;
+          if (tmpKey) fetchAndCacheImage(url, tmpKey).catch(()=>{});
+        }
+      } else {
+        // Show a brief error message in the card before re-render
+        if (imgCard) imgCard.innerHTML = `
+          <div class="img-auto-loading" style="color:var(--text-secondary)">
+            <span>No photo found. Try a URL or upload.</span>
+          </div>`;
+        await new Promise(r => setTimeout(r, 1800));
+      }
+      render(); modalFormCache = null; break;
+    }
 
     case 'save-workout': {
       const name   = document.getElementById('f-name')?.value.trim();
@@ -1272,42 +1668,103 @@ document.addEventListener('click', async e => {
       const day    = btn.dataset.day;
       const isEdit = btn.dataset.edit === 'true';
       if (!name) { document.getElementById('f-name')?.focus(); return; }
+
       if (isEdit && state.editTarget) {
         const { workoutId } = state.editTarget;
         const w = (state.workouts[day]||[]).find(x => x.id === workoutId);
-        if (pendingImg && w?._imgKey)       await saveImage(w._imgKey, pendingImg.dataURL);
-        else if (editImgRemoved && w?._imgKey) await deleteImage(w._imgKey);
-        editWorkout(day, workoutId, name, cat, notes);
+        if (pendingImg && w?._imgKey) {
+          await saveImage(w._imgKey, pendingImg.dataURL);
+          editWorkout(day, workoutId, name, cat, notes, undefined, true); // clear any URL
+        } else if (pendingImgURL !== null) {
+          if (editImgRemoved && w?._imgKey) await deleteImage(w._imgKey);
+          editWorkout(day, workoutId, name, cat, notes, pendingImgURL, false);
+        } else if (editImgRemoved) {
+          if (w?._imgKey) await deleteImage(w._imgKey);
+          editWorkout(day, workoutId, name, cat, notes, undefined, true);
+        } else {
+          editWorkout(day, workoutId, name, cat, notes);
+        }
       } else {
-        let imgKey = null;
-        if (pendingImg) { imgKey = uuid(); await saveImage(imgKey, pendingImg.dataURL); }
-        addWorkout(day, name, cat, notes, imgKey);
+        let imgKey = null, imgURL = null;
+        if (pendingImg) {
+          imgKey = uuid(); await saveImage(imgKey, pendingImg.dataURL);
+        } else if (pendingImgURL) {
+          imgKey = uuid(); imgURL = pendingImgURL; // pre-generate key so caching uses the exact key
+        }
+        addWorkout(day, name, cat, notes, imgKey, imgURL);
+        // Background-cache URL image under the pre-generated key
+        if (imgURL && imgKey) fetchAndCacheImage(imgURL, imgKey).catch(()=>{});
       }
-      pendingImg = null; editCurrentImg = null; editImgRemoved = false;
-      state.showModal = false; state.editTarget = null; render(); loadDayImages(state.currentDay); break;
+
+      pendingImg = null; pendingImgURL = null; editCurrentImg = null; editCurrentImgURL = null;
+      editImgRemoved = false; showURLInput = false; modalFormCache = null;
+      state.showModal = false; state.editTarget = null;
+      // Clear stale filter if the active category no longer exists on this day
+      if (state.filterCategory && !getCategories(state.currentDay).includes(state.filterCategory)) {
+        state.filterCategory = null;
+      }
+      render(); loadDayImages(state.currentDay); break;
     }
 
     case 'edit-workout': {
       const day = btn.dataset.day, wid = btn.dataset.workoutId;
       const w   = (state.workouts[day]||[]).find(x => x.id === wid);
-      editCurrentImg = w?._imgKey ? await getImage(w._imgKey) : null;
-      editImgRemoved = false; pendingImg = null;
+      editCurrentImg    = w?._imgKey && !w._imgURL ? await getImage(w._imgKey) : null;
+      editCurrentImgURL = w?._imgURL || null;
+      editImgRemoved = false; pendingImg = null; pendingImgURL = null;
+      showURLInput = false; modalFormCache = null;
       state.showModal = 'edit'; state.editTarget = { day, workoutId: wid }; render(); break;
     }
 
     case 'delete-workout':
       if (confirm('Delete this workout?')) await deleteWorkout(btn.dataset.day, btn.dataset.workoutId); break;
 
+    case 'copy-workout':
+      state.showModal = 'copy-workout';
+      state.editTarget = { day: btn.dataset.day, workoutId: btn.dataset.workoutId };
+      render(); break;
+
+    case 'confirm-copy-workout': {
+      const { day: srcDay, workoutId: srcId } = state.editTarget || {};
+      const targetDay = btn.dataset.day;
+      const srcW = (state.workouts[srcDay]||[]).find(x => x.id === srcId);
+      if (srcW && targetDay) {
+        const newId = uuid(), newKey = uuid();
+        if (!state.workouts[targetDay]) state.workouts[targetDay] = [];
+        state.workouts[targetDay].push({ ...srcW, id: newId, _imgKey: newKey, Day: targetDay });
+        saveState();
+        // Copy image in background
+        if (srcW._imgKey) getImage(srcW._imgKey).then(data => { if (data) saveImage(newKey, data); });
+      }
+      state.showModal = false; state.editTarget = null;
+      render(); loadDayImages(state.currentDay);
+      showToast(`Copied to ${targetDay}`);
+      break;
+    }
+
+    case 'install-pwa':
+      if (_deferredInstallPrompt) {
+        _deferredInstallPrompt.prompt();
+        _deferredInstallPrompt.userChoice.then(() => { _deferredInstallPrompt = null; render(); });
+      }
+      break;
+
     case 'add-image': {
       const imgKey = btn.dataset.imgKey, dataURL = await pickImage();
       if (!dataURL) return;
       await saveImage(imgKey, dataURL);
+      // Clear any stale _imgURL so the local copy is always canonical
+      const aiDay = btn.dataset.day, aiWid = btn.dataset.workoutId;
+      if (aiDay && aiWid) {
+        const aiW = (state.workouts[aiDay]||[]).find(x => x.id === aiWid);
+        if (aiW) editWorkout(aiDay, aiWid, aiW.Workout, aiW.Category, aiW.Notes, undefined, true);
+      }
       const imgEl = document.querySelector(`img[data-img-key="${CSS.escape(imgKey)}"]`);
       if (imgEl) { imgEl.src = dataURL; imgEl.style.display = ''; const l = imgEl.closest('.workout-body')?.querySelector('.photo-btn-label'); if(l) l.textContent='Change Photo'; }
       break;
     }
 
-    case 'view-image': { const src = btn.getAttribute('src'); if (src) showImageViewer(src); break; }
+    case 'view-image': { const src = btn.src || btn.getAttribute('src'); if (src) showImageViewer(src); break; }
 
     // ── Day management ─────────────────────────────────────────────────────────
 
@@ -1328,8 +1785,6 @@ document.addEventListener('click', async e => {
     case 'duplicate-day': {
       state.showModal = false; state.editTarget = null;
       const newName = await duplicateDay(btn.dataset.day);
-      render();
-      // Navigate into the new day
       state.view = 'day'; state.currentDay = newName; state.filterCategory = null;
       render(); window.scrollTo(0,0); loadDayImages(newName); acquireWakeLock(); break;
     }
@@ -1348,10 +1803,22 @@ document.addEventListener('click', async e => {
 });
 
 document.addEventListener('keydown', e => {
+  if (e.key === 'Enter') {
+    const t = e.target;
+    if (t.id === 'img-url-field') {
+      e.preventDefault();
+      document.querySelector('[data-action="confirm-url-input"]')?.click();
+    } else if (t.id === 'img-source-url') {
+      e.preventDefault();
+      document.querySelector('[data-action="reload-img-url"]')?.click();
+    }
+  }
   if (e.key === 'Escape') {
     document.getElementById('img-viewer')?.remove();
     if (state.showModal) {
-      pendingImg = null; editCurrentImg = null; editImgRemoved = false;
+      pendingImg = null; pendingImgURL = null;
+      editCurrentImg = null; editCurrentImgURL = null;
+      editImgRemoved = false; showURLInput = false; modalFormCache = null;
       state.showModal = false; state.editTarget = null; render();
       if (state.view === 'day') loadDayImages(state.currentDay);
     }
@@ -1367,9 +1834,24 @@ if ('serviceWorker' in navigator) {
   });
 }
 
+// ─── PWA Install Prompt ───────────────────────────────────────────────────────
+
+window.addEventListener('beforeinstallprompt', e => {
+  e.preventDefault();
+  _deferredInstallPrompt = e;
+  if (state.view === 'week') render(); // show install button in header
+});
+
+window.addEventListener('appinstalled', () => {
+  _deferredInstallPrompt = null;
+  if (state.view === 'week') render();
+  showToast('App installed! Open from your home screen.');
+});
+
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
 loadState();
+pruneOldLogs();
 applyTheme();
 render();
 setupSwipeHandlers();

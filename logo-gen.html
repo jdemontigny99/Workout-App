@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0d0d0d;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 32px;
+    font-family: -apple-system, sans-serif;
+  }
+  .previews { display: flex; align-items: flex-end; gap: 40px; }
+  .preview-wrap {
+    display: flex; flex-direction: column;
+    align-items: center; gap: 10px;
+    font-size: 12px; color: #555;
+  }
+  #c1024 { width: 300px; height: 300px; border-radius: 22.37%; box-shadow: 0 24px 64px rgba(0,0,0,0.8); }
+  #c76   { width: 76px;  height: 76px;  border-radius: 22.37%; box-shadow: 0 4px 16px rgba(0,0,0,0.6); }
+  #c40   { width: 40px;  height: 40px;  border-radius: 22.37%; box-shadow: 0 2px 8px rgba(0,0,0,0.6); }
+  button {
+    padding: 12px 36px; background: #007aff; color: #fff;
+    border: none; border-radius: 10px; font-size: 15px; font-weight: 600; cursor: pointer;
+  }
+</style>
+</head>
+<body>
+<div class="previews">
+  <div class="preview-wrap">
+    <canvas id="c1024" width="1024" height="1024"></canvas>
+    <span style="color:#555">1024 × 1024</span>
+  </div>
+  <div class="preview-wrap">
+    <canvas id="c76" width="76" height="76"></canvas>
+    <span style="color:#555">76 pt</span>
+  </div>
+  <div class="preview-wrap">
+    <canvas id="c40" width="40" height="40"></canvas>
+    <span style="color:#555">40 pt</span>
+  </div>
+</div>
+<button onclick="downloadPNG()">⬇ Download icon-1024.png</button>
+
+<script>
+function drawLogo(canvas) {
+  const S   = canvas.width;
+  const ctx = canvas.getContext('2d');
+  const p   = (v) => v * S / 1024;   // scale helper
+  ctx.clearRect(0, 0, S, S);
+
+  // ── 1. Background ─────────────────────────────────────────────────────────
+  const bg = ctx.createLinearGradient(0, 0, S * 0.8, S);
+  bg.addColorStop(0,   '#1247E6');
+  bg.addColorStop(0.55,'#2060F8');
+  bg.addColorStop(1,   '#5535D4');
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, S, S);
+
+  // Top-left soft glow
+  const glow = ctx.createRadialGradient(p(260), p(200), 0, p(260), p(200), p(550));
+  glow.addColorStop(0, 'rgba(255,255,255,0.13)');
+  glow.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = glow;
+  ctx.fillRect(0, 0, S, S);
+
+  // ── 2. Dumbbell — compact, bold, centered ─────────────────────────────────
+  // Dumbbell sits in upper 55% of icon, centered horizontally
+  const DY   = p(430);  // vertical centre of dumbbell
+
+  // Plate dims
+  const PW   = p(110);  // plate width
+  const PH   = p(280);  // plate height
+  const PR   = p(28);   // plate corner radius
+
+  // Collar dims
+  const CLW  = p(52);
+  const CLH  = p(170);
+
+  // Bar
+  const BARH = p(72);
+  const BAR_X1 = p(276);   // bar left
+  const BAR_X2 = p(748);   // bar right
+
+  // Plate positions
+  const LP_X = p(154);     // left plate left edge
+  const RP_X = p(760);     // right plate left edge
+
+  // Left collar left edge
+  const LC_X = LP_X + PW;
+  const RC_X = BAR_X2;
+
+  function rr(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y,     x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x,     y + h, r);
+    ctx.arcTo(x,     y + h, x,     y,     r);
+    ctx.arcTo(x,     y,     x + w, y,     r);
+    ctx.closePath();
+  }
+
+  // Shadow pass
+  ctx.save();
+  ctx.shadowColor   = 'rgba(0,0,30,0.45)';
+  ctx.shadowBlur    = p(20);
+  ctx.shadowOffsetY = p(10);
+  ctx.fillStyle = 'rgba(255,255,255,0.97)';
+
+  // Left plate
+  rr(LP_X, DY - PH/2, PW, PH, PR); ctx.fill();
+  // Left collar
+  rr(LC_X, DY - CLH/2, CLW, CLH, p(10)); ctx.fill();
+  // Bar
+  rr(BAR_X1, DY - BARH/2, BAR_X2 - BAR_X1, BARH, p(10)); ctx.fill();
+  // Right collar
+  rr(RC_X, DY - CLH/2, CLW, CLH, p(10)); ctx.fill();
+  // Right plate
+  rr(RP_X, DY - PH/2, PW, PH, PR); ctx.fill();
+  ctx.restore();
+
+  // ── 3. Green checkmark badge — bottom-right ───────────────────────────────
+  const BX = p(694);   // badge centre x
+  const BY = p(730);   // badge centre y
+  const BR = p(152);   // badge radius
+
+  // Badge shadow
+  ctx.save();
+  ctx.shadowColor   = 'rgba(0,0,0,0.45)';
+  ctx.shadowBlur    = p(22);
+  ctx.shadowOffsetY = p(8);
+
+  // Badge fill — green gradient
+  const bGrad = ctx.createRadialGradient(BX - p(40), BY - p(40), p(10), BX, BY, BR);
+  bGrad.addColorStop(0, '#4DEA82');
+  bGrad.addColorStop(1, '#18C257');
+  ctx.beginPath();
+  ctx.arc(BX, BY, BR, 0, Math.PI * 2);
+  ctx.fillStyle = bGrad;
+  ctx.fill();
+  ctx.restore();
+
+  // Badge border (subtle white ring)
+  ctx.beginPath();
+  ctx.arc(BX, BY, BR, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+  ctx.lineWidth   = p(5);
+  ctx.stroke();
+
+  // White checkmark
+  ctx.save();
+  ctx.strokeStyle  = '#ffffff';
+  ctx.lineWidth    = p(48);
+  ctx.lineCap      = 'round';
+  ctx.lineJoin     = 'round';
+  ctx.shadowColor  = 'rgba(0,80,30,0.3)';
+  ctx.shadowBlur   = p(8);
+  ctx.beginPath();
+  ctx.moveTo(BX - p(68), BY + p(2));
+  ctx.lineTo(BX - p(8),  BY + p(64));
+  ctx.lineTo(BX + p(84), BY - p(62));
+  ctx.stroke();
+  ctx.restore();
+}
+
+['c1024','c76','c40'].forEach(id => drawLogo(document.getElementById(id)));
+
+function downloadPNG() {
+  const link = Object.assign(document.createElement('a'), {
+    download: 'icon-1024.png',
+    href: document.getElementById('c1024').toDataURL('image/png')
+  });
+  link.click();
+}
+</script>
+</body>
+</html>

@@ -1386,6 +1386,171 @@ button, [data-action] {
 }
 .log-add-btn:active { opacity: 0.8; }
 
+/* ─── Image Source Options (Upload / URL / Auto-find) ────────────────────────── */
+.img-source-options {
+  display: flex;
+  gap: 0;
+}
+.img-source-btn {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 18px 8px;
+  background: none;
+  border: none;
+  border-right: 1px solid var(--separator);
+  cursor: pointer;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  transition: background 0.12s;
+}
+.img-source-btn:last-child { border-right: none; }
+.img-source-btn:active { background: rgba(0,122,255,0.08); }
+
+/* ─── URL Input in Modal ───────────────────────────────────────────────────────── */
+.img-url-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+.img-url-wrap .form-input {
+  border-bottom: 1px solid var(--separator);
+  border-radius: 0;
+}
+.img-url-btns {
+  display: flex;
+  border-top: none;
+}
+.img-url-cancel-btn,
+.img-url-confirm-btn {
+  flex: 1;
+  padding: 13px 16px;
+  border: none;
+  background: none;
+  font-size: 15px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.img-url-cancel-btn  { color: var(--text-secondary); border-right: 1px solid var(--separator); }
+.img-url-confirm-btn { color: var(--accent); font-weight: 600; }
+.img-url-cancel-btn:active  { background: rgba(0,0,0,0.04); }
+.img-url-confirm-btn:active { background: rgba(0,122,255,0.08); }
+
+/* ─── Editable URL Row (below image preview) ─────────────────────────────────── */
+.img-url-source-row {
+  display: flex;
+  align-items: center;
+  border-top: 1px solid var(--separator);
+}
+.img-url-source-input {
+  flex: 1;
+  padding: 9px 12px;
+  background: none;
+  border: none;
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-family: inherit;
+  min-width: 0;
+  outline: none;
+}
+.img-url-source-input:focus {
+  color: var(--text);
+}
+.img-url-reload-btn {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  background: none;
+  border: none;
+  border-left: 1px solid var(--separator);
+  cursor: pointer;
+  color: var(--accent);
+  padding: 0;
+  transition: background 0.12s;
+}
+.img-url-reload-btn:active { background: rgba(0,122,255,0.08); }
+.img-url-reload-btn svg { width: 16px; height: 16px; }
+
+/* ─── Auto-find Loading State ─────────────────────────────────────────────────── */
+.img-auto-loading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 20px 16px;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+/* ─── Copy-to button (workout actions) ────────────────────────────────────────── */
+.copy-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--accent);
+  padding: 10px 8px;
+  min-width: 36px;
+  min-height: 44px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.8;
+  transition: opacity 0.15s;
+}
+.copy-btn:active { opacity: 1; }
+
+/* ─── Toast Notification ───────────────────────────────────────────────────────── */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(88px + env(safe-area-inset-bottom, 0px));
+  transform: translateX(-50%) translateY(12px);
+  background: #1c1c1e;
+  color: #fff;
+  border-radius: 12px;
+  padding: 12px 16px;
+  font-size: 14px;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  white-space: nowrap;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+  opacity: 0;
+  transition: opacity 0.2s, transform 0.2s;
+  z-index: 9999;
+  pointer-events: none;
+}
+.toast.toast-visible {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+  pointer-events: auto;
+}
+.toast-msg { flex: 1; }
+.toast-undo-btn {
+  background: none;
+  border: none;
+  color: #4fc3f7;
+  font-size: 14px;
+  font-weight: 700;
+  font-family: inherit;
+  cursor: pointer;
+  padding: 2px 0;
+  flex-shrink: 0;
+}
+[data-theme="dark"] .toast {
+  background: #3a3a3c;
+}
+
 /* ─── Confirm Dialog (native) ─────────────────────────────────────────────────── */
 
 /* ─── Responsive ───────────────────────────────────────────────────────────────── */

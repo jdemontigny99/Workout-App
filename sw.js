@@ -1,4 +1,4 @@
-const CACHE = 'workout-tracker-v4';
+const CACHE = 'workout-tracker-v9';
 const STATIC = [
   './',
   './index.html',
