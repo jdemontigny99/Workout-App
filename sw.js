@@ -1,10 +1,12 @@
-const CACHE = 'workout-tracker-v9';
+const CACHE = 'workout-tracker-v10';
 const STATIC = [
   './',
   './index.html',
   './app.css',
   './app.js',
   './manifest.json',
+  './icons/icon-192.png',
+  './icons/icon-512.png',
   './icons/icon-1024.png',
 ];
 

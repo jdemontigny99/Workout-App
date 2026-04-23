@@ -344,7 +344,7 @@ function saveWeekSnapshot() {
     const w = state.workouts[day] || [];
     history[key][day] = { done: w.filter(x => state.completedIDs.has(x.id)).length, total: w.length };
   }
-  localStorage.setItem(KEYS.history, JSON.stringify(history));
+  try { localStorage.setItem(KEYS.history, JSON.stringify(history)); } catch {}
 }
 
 function weekKeyToLabel(key) {
@@ -525,6 +525,7 @@ async function duplicateDay(sourceName) {
     if (!src._imgKey) continue;
     const data = await getImage(src._imgKey);
     if (data) await saveImage(newWorkouts[i]._imgKey, data);
+    else if (src._imgURL) fetchAndCacheImage(src._imgURL, newWorkouts[i]._imgKey).catch(() => {});
   }
   return name;
 }
@@ -751,50 +752,93 @@ function showToast(msg, opts = {}) {
 }
 
 // ─── Auto-find Image ──────────────────────────────────────────────────────────
-// Primary: wger.de exercise database (purpose-built, reliable demo photos)
-// Fallback: Wikipedia
+// Primary:  oss.exercisedb.dev — 1,500 exercises, animated GIFs, no API key
+// Fallback: wger.de            — 345 exercises, static images, no API key
+
+function _buildSearchTerms(name) {
+  const terms = [name];
+  const lower = name.toLowerCase();
+
+  // Strip common equipment/modifier words so "Barbell Bench Press" → "bench press"
+  const modifiers = ['barbell', 'dumbbell', 'cable', 'machine', 'ez-bar', 'ez bar',
+                     'smith machine', 'resistance band', 'kettlebell', 'band',
+                     'incline', 'decline', 'seated', 'standing', 'lying', 'with'];
+  let stripped = lower;
+  for (const m of modifiers) stripped = stripped.replace(new RegExp(`\\b${m}\\b`, 'gi'), '').replace(/\s{2,}/g, ' ').trim();
+  if (stripped && stripped !== lower) terms.push(stripped);
+
+  // First 2 meaningful words for long names ("Romanian Deadlift With Dumbbells" → "Romanian Deadlift")
+  const words = name.split(/\s+/).filter(w => w.length > 2);
+  if (words.length > 2) terms.push(words.slice(0, 2).join(' '));
+
+  return [...new Set(terms)];
+}
 
 async function fetchExerciseImage(name) {
-  const term = name.trim();
+  const searchTerms = _buildSearchTerms(name.trim());
 
-  // ── 1. wger.de exercise database ────────────────────────────────────────────
-  try {
-    const q = encodeURIComponent(term);
-    const searchRes = await fetch(
-      `https://wger.de/api/v2/exercise/search/?term=${q}&language=english&format=json`,
-      { signal: AbortSignal.timeout(5000) }
-    );
-    if (searchRes.ok) {
-      const data    = await searchRes.json();
-      const hit     = data.suggestions?.[0];
-      const baseId  = hit?.data?.base_id;
-      if (baseId) {
-        const imgRes  = await fetch(`https://wger.de/api/v2/exerciseimage/?exercise_base=${baseId}&format=json`,
-          { signal: AbortSignal.timeout(5000) });
-        const imgData = await imgRes.json();
-        const imgs    = imgData.results || [];
-        const img     = imgs.find(i => i.is_main) || imgs[0];
-        if (img?.image) return img.image;
+  // ── 1. oss.exercisedb.dev — 1,500 exercises with animated GIFs ──────────────
+  for (const term of searchTerms) {
+    try {
+      const q   = encodeURIComponent(term);
+      const res = await fetch(
+        `https://oss.exercisedb.dev/api/v1/exercises?limit=5&name=${q}`,
+        { signal: AbortSignal.timeout(7000) }
+      );
+      if (res.ok) {
+        const data = await res.json();
+        // API returns either a plain array or { exercises: [...] }
+        const list = Array.isArray(data) ? data : (data.exercises || data.data || []);
+        const gif  = list[0]?.gifUrl;
+        if (gif) return gif;
       }
-    }
-  } catch {}
+    } catch {}
+  }
 
-  // ── 2. Wikipedia fallback ────────────────────────────────────────────────────
-  try {
-    const q = encodeURIComponent(term + ' exercise');
-    const searchRes  = await fetch(`https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${q}&format=json&origin=*&srlimit=5`);
-    const searchData = await searchRes.json();
-    const results    = searchData.query?.search || [];
-    for (const result of results) {
-      const title   = encodeURIComponent(result.title);
-      const imgRes  = await fetch(`https://en.wikipedia.org/w/api.php?action=query&titles=${title}&prop=pageimages&format=json&pithumbsize=1200&origin=*`);
-      const imgData = await imgRes.json();
-      const page    = Object.values(imgData.query.pages)[0];
-      if (page?.thumbnail?.source) return page.thumbnail.source;
-    }
-  } catch {}
+  // ── 2. wger.de — fuzzy autocomplete, checks top 5 suggestions ────────────────
+  for (const term of searchTerms) {
+    const q = encodeURIComponent(term);
+    try {
+      const res = await fetch(
+        `https://wger.de/api/v2/exercise/search/?term=${q}&language=english&format=json`,
+        { signal: AbortSignal.timeout(6000) }
+      );
+      if (res.ok) {
+        const data = await res.json();
+        for (const hit of (data.suggestions || []).slice(0, 5)) {
+          const baseId = hit?.data?.base_id;
+          if (!baseId) continue;
+          try {
+            const imgRes = await fetch(
+              `https://wger.de/api/v2/exerciseimage/?exercise_base=${baseId}&format=json`,
+              { signal: AbortSignal.timeout(5000) }
+            );
+            if (!imgRes.ok) continue;
+            const imgs = (await imgRes.json()).results || [];
+            const img  = imgs.find(i => i.is_main) || imgs[0];
+            if (img?.image) return img.image;
+          } catch {}
+        }
+      }
+    } catch {}
 
-  return null;
+    // wger direct name lookup (exact-ish match)
+    try {
+      const res = await fetch(
+        `https://wger.de/api/v2/exerciseinfo/?format=json&language=2&limit=10&name=${q}`,
+        { signal: AbortSignal.timeout(6000) }
+      );
+      if (res.ok) {
+        const data = await res.json();
+        for (const ex of (data.results || [])) {
+          const img = ex.images?.find(i => i.is_main) || ex.images?.[0];
+          if (img?.image) return img.image;
+        }
+      }
+    } catch {}
+  }
+
+  return null; // nothing found — use the URL field to paste one manually
 }
 
 // ─── Fetch URL → compress → store in IndexedDB ────────────────────────────────
@@ -806,13 +850,20 @@ async function fetchAndCacheImage(url, imgKey) {
     const blob = await resp.blob();
     if (!blob.type.startsWith('image/')) return false;
 
-    // Blob → data URL → compress via canvas
     const raw = await new Promise((res, rej) => {
       const r = new FileReader();
       r.onload = e => res(e.target.result);
       r.onerror = rej;
       r.readAsDataURL(blob);
     });
+
+    // GIFs: store as-is so animation is preserved
+    if (blob.type === 'image/gif') {
+      await saveImage(imgKey, raw);
+      return true;
+    }
+
+    // All other formats: compress to JPEG via canvas
     const compressed = await new Promise(res => {
       const img = new Image();
       img.onload = () => {
@@ -1733,8 +1784,11 @@ document.addEventListener('click', async e => {
         if (!state.workouts[targetDay]) state.workouts[targetDay] = [];
         state.workouts[targetDay].push({ ...srcW, id: newId, _imgKey: newKey, Day: targetDay });
         saveState();
-        // Copy image in background
-        if (srcW._imgKey) getImage(srcW._imgKey).then(data => { if (data) saveImage(newKey, data); });
+        // Copy image in background (IndexedDB first, URL fallback for URL-only images)
+        if (srcW._imgKey) getImage(srcW._imgKey).then(data => {
+          if (data) saveImage(newKey, data);
+          else if (srcW._imgURL) fetchAndCacheImage(srcW._imgURL, newKey).catch(() => {});
+        });
       }
       state.showModal = false; state.editTarget = null;
       render(); loadDayImages(state.currentDay);
@@ -1811,6 +1865,20 @@ document.addEventListener('keydown', e => {
     } else if (t.id === 'img-source-url') {
       e.preventDefault();
       document.querySelector('[data-action="reload-img-url"]')?.click();
+    } else if (t.id === 'f-day-name') {
+      // Enter in Add Day / Rename Day modal submits the form
+      e.preventDefault();
+      (document.querySelector('[data-action="save-day"]') ||
+       document.querySelector('[data-action="save-rename-day"]'))?.click();
+    } else if (t.id?.startsWith('log-weight-')) {
+      // Enter in weight field advances focus to the reps field
+      e.preventDefault();
+      const wid = t.id.replace('log-weight-', '');
+      document.getElementById(`log-reps-${wid}`)?.focus();
+    } else if (t.id?.startsWith('log-reps-')) {
+      e.preventDefault();
+      const wid = t.id.replace('log-reps-', '');
+      document.querySelector(`[data-action="log-set"][data-workout-id="${CSS.escape(wid)}"]`)?.click();
     }
   }
   if (e.key === 'Escape') {

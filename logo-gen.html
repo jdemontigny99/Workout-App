@@ -44,7 +44,7 @@
     <span style="color:#555">40 pt</span>
   </div>
 </div>
-<button onclick="downloadPNG()">⬇ Download icon-1024.png</button>
+<button onclick="downloadAll()">⬇ Download All Icon Sizes (192 · 512 · 1024)</button>
 
 <script>
 function drawLogo(canvas) {
@@ -169,12 +169,22 @@ function drawLogo(canvas) {
 
 ['c1024','c76','c40'].forEach(id => drawLogo(document.getElementById(id)));
 
-function downloadPNG() {
+function downloadSize(size, filename) {
+  const offscreen = document.createElement('canvas');
+  offscreen.width = offscreen.height = size;
+  drawLogo(offscreen);
   const link = Object.assign(document.createElement('a'), {
-    download: 'icon-1024.png',
-    href: document.getElementById('c1024').toDataURL('image/png')
+    download: filename,
+    href: offscreen.toDataURL('image/png')
   });
   link.click();
+}
+
+function downloadAll() {
+  // Small delay between each so browsers don't block multiple downloads
+  downloadSize(192,  'icon-192.png');
+  setTimeout(() => downloadSize(512,  'icon-512.png'),  300);
+  setTimeout(() => downloadSize(1024, 'icon-1024.png'), 600);
 }
 </script>
 </body>
