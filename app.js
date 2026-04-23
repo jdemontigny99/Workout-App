@@ -32,8 +32,9 @@ let pendingImgURL     = null;   // string — pasted or auto-found URL
 let editCurrentImg    = null;   // base64 of existing local image (edit mode)
 let editCurrentImgURL = null;   // URL of existing URL image (edit mode)
 let editImgRemoved    = false;
-let showURLInput      = false;  // show URL text field in modal
-let modalFormCache    = null;   // { name, cat, notes } preserved across async renders
+let showURLInput        = false;  // show URL text field in modal
+let imageSearchResults  = null;   // null | [] | [{url,name,score}] — image picker state
+let modalFormCache      = null;   // { name, cat, notes } preserved across async renders
 let _deferredInstallPrompt = null; // BeforeInstallPromptEvent
 let _undoPendingSet   = null;   // { workoutId, setIndex, setData, timeoutId }
 let _toastTimeout     = null;
@@ -176,7 +177,8 @@ function loadState() {
   } catch { state.completedIDs = new Set(); }
 
   const savedDays = localStorage.getItem(KEYS.days);
-  state.days = savedDays ? JSON.parse(savedDays) : [...DEFAULT_DAYS];
+  try { state.days = savedDays ? JSON.parse(savedDays) : [...DEFAULT_DAYS]; }
+  catch { state.days = [...DEFAULT_DAYS]; }
 
   const savedWorkouts = localStorage.getItem(KEYS.workouts);
   if (savedWorkouts) {
@@ -479,14 +481,14 @@ async function deleteWorkout(day, workoutId) {
 function addDay(name) {
   const t = name.trim();
   if (!t) return false;
-  if (state.days.map(d => d.toLowerCase()).includes(t.toLowerCase())) { alert(`"${t}" already exists.`); return false; }
+  if (state.days.map(d => d.toLowerCase()).includes(t.toLowerCase())) { showToast(`"${t}" already exists.`); return false; }
   state.days.push(t); state.workouts[t] = []; saveState(); return true;
 }
 
 function renameDay(oldName, newName) {
   const t = newName.trim();
   if (!t || oldName === t) return false;
-  if (state.days.filter(d => d !== oldName).map(d => d.toLowerCase()).includes(t.toLowerCase())) { alert(`"${t}" already exists.`); return false; }
+  if (state.days.filter(d => d !== oldName).map(d => d.toLowerCase()).includes(t.toLowerCase())) { showToast(`"${t}" already exists.`); return false; }
   const idx = state.days.indexOf(oldName); if (idx === -1) return false;
   state.days[idx] = t;
   state.workouts[t] = (state.workouts[oldName] || []).map(w => ({ ...w, Day: t }));
@@ -644,14 +646,14 @@ async function importData(file) {
     if (!data.days || !data.workouts) throw new Error('Not a valid Workout Tracker backup.');
     state.days = data.days; state.workouts = data.workouts;
     state.completedIDs = new Set(data.completedIDs || []);
-    if (data.weekHistory) localStorage.setItem(KEYS.history, JSON.stringify(data.weekHistory));
+    if (data.weekHistory) { try { localStorage.setItem(KEYS.history, JSON.stringify(data.weekHistory)); } catch {} }
     if (data.logs)        saveLogs(data.logs);
     pruneOldLogs();
     saveState();
-    alert('Import successful! Note: exercise photos are not included in backups.');
     render();
     if (state.view === 'day') loadDayImages(state.currentDay);
-  } catch (err) { alert(`Import failed: ${err.message}`); }
+    showToast('Import successful! Photos not included in backups.', { duration: 5000 });
+  } catch (err) { showToast(`Import failed: ${err.message}`, { duration: 6000 }); }
 }
 
 function triggerImport() {
@@ -751,94 +753,87 @@ function showToast(msg, opts = {}) {
   }, opts.duration ?? 4000);
 }
 
-// ─── Auto-find Image ──────────────────────────────────────────────────────────
+// ─── Image Search ─────────────────────────────────────────────────────────────
 // Primary:  oss.exercisedb.dev — 1,500 exercises, animated GIFs, no API key
 // Fallback: wger.de            — 345 exercises, static images, no API key
+// Returns up to `limit` results sorted by name-match score so the best fits
+// appear first. The user picks from a grid rather than trusting a single guess.
 
 function _buildSearchTerms(name) {
   const terms = [name];
   const lower = name.toLowerCase();
-
-  // Strip common equipment/modifier words so "Barbell Bench Press" → "bench press"
   const modifiers = ['barbell', 'dumbbell', 'cable', 'machine', 'ez-bar', 'ez bar',
                      'smith machine', 'resistance band', 'kettlebell', 'band',
                      'incline', 'decline', 'seated', 'standing', 'lying', 'with'];
   let stripped = lower;
-  for (const m of modifiers) stripped = stripped.replace(new RegExp(`\\b${m}\\b`, 'gi'), '').replace(/\s{2,}/g, ' ').trim();
+  for (const m of modifiers)
+    stripped = stripped.replace(new RegExp(`\\b${m}\\b`, 'gi'), '').replace(/\s{2,}/g, ' ').trim();
   if (stripped && stripped !== lower) terms.push(stripped);
-
-  // First 2 meaningful words for long names ("Romanian Deadlift With Dumbbells" → "Romanian Deadlift")
   const words = name.split(/\s+/).filter(w => w.length > 2);
   if (words.length > 2) terms.push(words.slice(0, 2).join(' '));
-
   return [...new Set(terms)];
 }
 
-async function fetchExerciseImage(name) {
+function _scoreMatch(candidateName, searchTerm) {
+  const cn = candidateName.toLowerCase();
+  const st = searchTerm.toLowerCase();
+  if (cn === st) return 100;
+  if (cn.startsWith(st)) return 90;
+  if (cn.includes(st)) return Math.max(50, 80 - Math.round((cn.length - st.length) / 3));
+  const words = st.split(/\s+/).filter(Boolean);
+  const hits  = words.filter(w => cn.includes(w)).length;
+  return Math.round((hits / Math.max(words.length, 1)) * 40);
+}
+
+async function fetchExerciseImages(name, limit = 8) {
   const searchTerms = _buildSearchTerms(name.trim());
+  const seen    = new Set();
+  const results = [];
 
-  // ── 1. oss.exercisedb.dev — 1,500 exercises with animated GIFs ──────────────
-  for (const term of searchTerms) {
-    try {
-      const q   = encodeURIComponent(term);
-      const res = await fetch(
-        `https://oss.exercisedb.dev/api/v1/exercises?limit=5&name=${q}`,
-        { signal: AbortSignal.timeout(7000) }
-      );
-      if (res.ok) {
-        const data = await res.json();
-        // API returns either a plain array or { exercises: [...] }
-        const list = Array.isArray(data) ? data : (data.exercises || data.data || []);
-        const gif  = list[0]?.gifUrl;
-        if (gif) return gif;
-      }
-    } catch {}
-  }
+  const add = (url, exName, term) => {
+    if (!url || seen.has(url)) return;
+    seen.add(url);
+    results.push({ url, name: exName, score: _scoreMatch(exName, term) });
+  };
 
-  // ── 2. wger.de — fuzzy autocomplete, checks top 5 suggestions ────────────────
   for (const term of searchTerms) {
+    if (results.length >= limit * 2) break;
     const q = encodeURIComponent(term);
-    try {
-      const res = await fetch(
-        `https://wger.de/api/v2/exercise/search/?term=${q}&language=english&format=json`,
-        { signal: AbortSignal.timeout(6000) }
-      );
-      if (res.ok) {
-        const data = await res.json();
-        for (const hit of (data.suggestions || []).slice(0, 5)) {
-          const baseId = hit?.data?.base_id;
-          if (!baseId) continue;
-          try {
-            const imgRes = await fetch(
-              `https://wger.de/api/v2/exerciseimage/?exercise_base=${baseId}&format=json`,
-              { signal: AbortSignal.timeout(5000) }
-            );
-            if (!imgRes.ok) continue;
-            const imgs = (await imgRes.json()).results || [];
-            const img  = imgs.find(i => i.is_main) || imgs[0];
-            if (img?.image) return img.image;
-          } catch {}
-        }
-      }
-    } catch {}
 
-    // wger direct name lookup (exact-ish match)
-    try {
-      const res = await fetch(
-        `https://wger.de/api/v2/exerciseinfo/?format=json&language=2&limit=10&name=${q}`,
-        { signal: AbortSignal.timeout(6000) }
-      );
-      if (res.ok) {
-        const data = await res.json();
-        for (const ex of (data.results || [])) {
-          const img = ex.images?.find(i => i.is_main) || ex.images?.[0];
-          if (img?.image) return img.image;
-        }
-      }
-    } catch {}
+    // Fire both sources in parallel — roughly halves total search time
+    await Promise.allSettled([
+
+      // ── ExerciseDB: animated GIFs ────────────────────────────────────────────
+      fetch(`https://oss.exercisedb.dev/api/v1/exercises?limit=${limit}&name=${q}`,
+        { signal: AbortSignal.timeout(7000) })
+        .then(res => res.ok ? res.json() : null)
+        .then(json => {
+          if (!json) return;
+          const list = Array.isArray(json) ? json : (json.data || json.exercises || []);
+          for (const ex of list) {
+            if (ex?.gifUrl) add(ex.gifUrl, ex.name || term, term);
+          }
+        })
+        .catch(() => {}),
+
+      // ── wger: static images ──────────────────────────────────────────────────
+      fetch(`https://wger.de/api/v2/exerciseinfo/?format=json&language=2&limit=6&name=${q}`,
+        { signal: AbortSignal.timeout(6000) })
+        .then(res => res.ok ? res.json() : null)
+        .then(data => {
+          if (!data) return;
+          for (const ex of (data.results || [])) {
+            const img    = ex.images?.find(i => i.is_main) || ex.images?.[0];
+            const exName = ex.translations?.find(t => t.language === 2)?.name
+                        || ex.name || term;
+            if (img?.image) add(img.image, exName, term);
+          }
+        })
+        .catch(() => {}),
+    ]);
   }
 
-  return null; // nothing found — use the URL field to paste one manually
+  return results.sort((a, b) => b.score - a.score).slice(0, limit);
 }
 
 // ─── Fetch URL → compress → store in IndexedDB ────────────────────────────────
@@ -1284,6 +1279,30 @@ function renderWorkoutModal() {
           <button type="button" class="img-url-confirm-btn" data-action="confirm-url-input">Use URL</button>
         </div>
       </div>`;
+  } else if (imageSearchResults !== null) {
+    // Image picker grid — shown after user taps "Find Images"
+    if (imageSearchResults.length === 0) {
+      imgSection = `
+        <div class="img-search-empty">
+          <span>No images found for "${esc(prefill.name)}".</span>
+          <button type="button" class="img-search-cancel-btn" data-action="cancel-img-search">
+            ← Back
+          </button>
+        </div>`;
+    } else {
+      imgSection = `
+        <div class="img-search-grid">
+          ${imageSearchResults.map((r, i) => `
+            <button type="button" class="img-search-result"
+                    data-action="pick-search-result" data-index="${i}">
+              <img src="${esc(r.url)}" alt="${esc(r.name)}" loading="lazy" crossorigin="anonymous">
+              <span class="img-search-result-name">${esc(r.name)}</span>
+            </button>`).join('')}
+        </div>
+        <button type="button" class="img-search-cancel-btn" data-action="cancel-img-search">
+          Cancel
+        </button>`;
+    }
   } else {
     imgSection = `
       <div class="img-source-options">
@@ -1294,7 +1313,7 @@ function renderWorkoutModal() {
           ${ICONS.link}<span>Paste URL</span>
         </button>
         <button type="button" class="img-source-btn" data-action="auto-find-image">
-          ${ICONS.sparkle}<span>Auto-find</span>
+          ${ICONS.sparkle}<span>Find Images</span>
         </button>
       </div>`;
   }
@@ -1345,7 +1364,9 @@ function render() {
   if (!app) return;
   try {
     app.innerHTML = state.view === 'week' ? renderWeekView() : renderDayView();
-    if (state.showModal) {
+    // Don't steal focus when the image picker grid is visible — keyboard would
+    // pop up on mobile and scroll the modal away from the grid.
+    if (state.showModal && imageSearchResults === null) {
       requestAnimationFrame(() => {
         const first = document.getElementById('f-day-name')
                    || document.getElementById('img-url-field')
@@ -1502,7 +1523,7 @@ function setupReorderHandlers() {
 document.addEventListener('click', async e => {
   if (e.target.id === 'modal-overlay') {
     pendingImg = null; pendingImgURL = null; editCurrentImg = null; editCurrentImgURL = null;
-    editImgRemoved = false; showURLInput = false; modalFormCache = null;
+    editImgRemoved = false; showURLInput = false; imageSearchResults = null; modalFormCache = null;
     state.showModal = false; state.editTarget = null; state.showHistory = false;
     render(); if (state.view === 'day') loadDayImages(state.currentDay); return;
   }
@@ -1520,7 +1541,7 @@ document.addEventListener('click', async e => {
       pauseTimer(); // stop interval before leaving day view
       state.view = 'week'; state.currentDay = null; state.showModal = false; state.editTarget = null;
       pendingImg = null; pendingImgURL = null; editCurrentImg = null; editCurrentImgURL = null;
-      editImgRemoved = false; showURLInput = false; modalFormCache = null;
+      editImgRemoved = false; showURLInput = false; imageSearchResults = null; modalFormCache = null;
       releaseWakeLock(); render(); window.scrollTo(0,0);
       break;
 
@@ -1609,12 +1630,12 @@ document.addEventListener('click', async e => {
 
     case 'show-modal':
       pendingImg = null; pendingImgURL = null; editCurrentImg = null; editCurrentImgURL = null;
-      editImgRemoved = false; showURLInput = false; modalFormCache = null;
+      editImgRemoved = false; showURLInput = false; imageSearchResults = null; modalFormCache = null;
       state.showModal = 'add'; state.editTarget = null; render(); break;
 
     case 'close-modal':
       pendingImg = null; pendingImgURL = null; editCurrentImg = null; editCurrentImgURL = null;
-      editImgRemoved = false; showURLInput = false; modalFormCache = null;
+      editImgRemoved = false; showURLInput = false; imageSearchResults = null; modalFormCache = null;
       state.showModal = false; state.editTarget = null; render();
       if (state.view === 'day') loadDayImages(state.currentDay); break;
 
@@ -1624,7 +1645,7 @@ document.addEventListener('click', async e => {
     }
     case 'remove-modal-image':
       pendingImg = null; pendingImgURL = null; editCurrentImg = null; editCurrentImgURL = null;
-      editImgRemoved = true; showURLInput = false; render(); break;
+      editImgRemoved = true; showURLInput = false; imageSearchResults = null; render(); break;
 
     // ── URL image input ────────────────────────────────────────────────────────
     case 'show-url-input': {
@@ -1676,7 +1697,7 @@ document.addEventListener('click', async e => {
       break;
     }
 
-    // ── Auto-find image ────────────────────────────────────────────────────────
+    // ── Image search / picker ──────────────────────────────────────────────────
     case 'auto-find-image': {
       const name  = document.getElementById('f-name')?.value.trim()     || '';
       const cat   = document.getElementById('f-category')?.value.trim() || '';
@@ -1684,33 +1705,38 @@ document.addEventListener('click', async e => {
       if (!name) { document.getElementById('f-name')?.focus(); break; }
       modalFormCache = { name, cat, notes };
 
-      // Show spinner in-place without re-rendering the whole form
+      // Show spinner in-place while fetching
       const imgCard = btn.closest('.form-card');
       if (imgCard) imgCard.innerHTML = `
         <div class="img-auto-loading">
           <div class="spinner"></div>
-          <span>Searching for "${esc(name)}"…</span>
+          <span>Finding images for "${esc(name)}"…</span>
         </div>`;
 
-      const url = await fetchExerciseImage(name);
-      if (url) {
-        pendingImgURL = url; pendingImg = null; editImgRemoved = false;
-        // Background-cache for edit mode (add mode is handled in save-workout)
+      const results = await fetchExerciseImages(name, 8);
+      imageSearchResults = results;  // [] triggers "no results" UI
+      render(); modalFormCache = null; break;
+    }
+
+    case 'pick-search-result': {
+      const idx    = parseInt(btn.dataset.index, 10);
+      const result = imageSearchResults?.[idx];
+      if (result) {
+        pendingImgURL = result.url; pendingImg = null; editImgRemoved = false;
+        imageSearchResults = null;
+        render();
+        // Background-cache for edit mode (add mode handled in save-workout)
         if (state.editTarget) {
           const tmpKey = (state.workouts[state.editTarget.day]||[])
             .find(x => x.id === state.editTarget.workoutId)?._imgKey;
-          if (tmpKey) fetchAndCacheImage(url, tmpKey).catch(()=>{});
+          if (tmpKey) fetchAndCacheImage(result.url, tmpKey).catch(() => {});
         }
-      } else {
-        // Show a brief error message in the card before re-render
-        if (imgCard) imgCard.innerHTML = `
-          <div class="img-auto-loading" style="color:var(--text-secondary)">
-            <span>No photo found. Try a URL or upload.</span>
-          </div>`;
-        await new Promise(r => setTimeout(r, 1800));
       }
-      render(); modalFormCache = null; break;
+      break;
     }
+
+    case 'cancel-img-search':
+      imageSearchResults = null; render(); break;
 
     case 'save-workout': {
       const name   = document.getElementById('f-name')?.value.trim();
@@ -1748,7 +1774,7 @@ document.addEventListener('click', async e => {
       }
 
       pendingImg = null; pendingImgURL = null; editCurrentImg = null; editCurrentImgURL = null;
-      editImgRemoved = false; showURLInput = false; modalFormCache = null;
+      editImgRemoved = false; showURLInput = false; imageSearchResults = null; modalFormCache = null;
       state.showModal = false; state.editTarget = null;
       // Clear stale filter if the active category no longer exists on this day
       if (state.filterCategory && !getCategories(state.currentDay).includes(state.filterCategory)) {
@@ -1829,7 +1855,8 @@ document.addEventListener('click', async e => {
     }
     case 'edit-day': state.showModal = 'edit-day'; state.editTarget = { day: btn.dataset.day }; render(); break;
     case 'save-rename-day': {
-      renameDay(btn.dataset.day, document.getElementById('f-day-name')?.value);
+      const renamed = renameDay(btn.dataset.day, document.getElementById('f-day-name')?.value);
+      if (!renamed) break; // stay in modal — duplicate shows toast, empty name just keeps focus
       state.showModal = false; state.editTarget = null; render();
       if (state.view === 'day') loadDayImages(state.currentDay); break;
     }
@@ -1886,7 +1913,7 @@ document.addEventListener('keydown', e => {
     if (state.showModal) {
       pendingImg = null; pendingImgURL = null;
       editCurrentImg = null; editCurrentImgURL = null;
-      editImgRemoved = false; showURLInput = false; modalFormCache = null;
+      editImgRemoved = false; showURLInput = false; imageSearchResults = null; modalFormCache = null;
       state.showModal = false; state.editTarget = null; render();
       if (state.view === 'day') loadDayImages(state.currentDay);
     }

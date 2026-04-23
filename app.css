@@ -1490,6 +1490,76 @@ button, [data-action] {
   font-size: 14px;
 }
 
+/* ─── Image Search Grid ───────────────────────────────────────────────────────── */
+.img-search-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1px;
+  background: var(--separator);
+  overflow: hidden;
+}
+
+.img-search-result {
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+  overflow: hidden;
+  transition: opacity 0.15s;
+}
+.img-search-result:active { opacity: 0.7; }
+
+.img-search-result img {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  display: block;
+  background: var(--surface2);
+}
+
+.img-search-result-name {
+  padding: 5px 8px 7px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.3;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  text-transform: capitalize;
+}
+
+.img-search-cancel-btn {
+  display: block;
+  width: 100%;
+  padding: 13px 16px;
+  background: none;
+  border: none;
+  border-top: 1px solid var(--separator);
+  color: var(--text-secondary);
+  font-size: 15px;
+  font-family: inherit;
+  cursor: pointer;
+  text-align: center;
+  transition: background 0.12s;
+}
+.img-search-cancel-btn:active { background: rgba(0,0,0,0.04); }
+[data-theme="dark"] .img-search-cancel-btn:active { background: rgba(255,255,255,0.06); }
+
+.img-search-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 28px 16px 16px;
+  color: var(--text-secondary);
+  font-size: 14px;
+  text-align: center;
+}
+
 /* ─── Copy-to button (workout actions) ────────────────────────────────────────── */
 .copy-btn {
   background: none;
