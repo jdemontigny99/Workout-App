@@ -547,7 +547,8 @@ button, [data-action] {
   backdrop-filter: blur(4px);
   transition: background 0.15s;
 }
-.img-remove-btn:hover { background: rgba(0,0,0,0.75); }
+.img-remove-btn:hover  { background: rgba(0,0,0,0.75); }
+.img-remove-btn:active { background: rgba(0,0,0,0.85); }
 
 .delete-btn {
   background: none;
@@ -653,9 +654,16 @@ button, [data-action] {
   font-size: 17px;
   color: var(--accent);
   cursor: pointer;
-  padding: 4px 2px;
+  padding: 0 6px;
+  min-height: 44px;
+  min-width: 44px;
+  display: flex;
+  align-items: center;
   font-family: inherit;
+  border-radius: 8px;
+  transition: background 0.12s;
 }
+.modal-cancel:active, .modal-save:active { background: rgba(0,122,255,0.1); }
 .modal-save { font-weight: 600; }
 
 /* ─── Form ────────────────────────────────────────────────────────────────────── */
@@ -974,19 +982,21 @@ button, [data-action] {
 
 .timer-inner {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 14px 16px 12px;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 16px 14px;
 }
 
-.timer-left { flex: 1; min-width: 0; }
-
-.timer-label-row {
+.timer-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 8px;
+}
+
+.timer-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
 .timer-collapse-btn {
   background: none;
@@ -1012,17 +1022,18 @@ button, [data-action] {
 
 .timer-preset-row {
   display: flex;
-  gap: 6px;
+  gap: 8px;
 }
 
 .timer-preset-btn {
-  padding: 8px 14px;
-  min-height: 36px;
+  flex: 1;
+  padding: 10px 8px;
+  min-height: 40px;
   border-radius: 99px;
   border: 1.5px solid var(--border);
   background: none;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 500;
   cursor: pointer;
   font-family: inherit;
@@ -1036,14 +1047,6 @@ button, [data-action] {
 .timer-preset-btn:disabled {
   opacity: 0.4;
   cursor: default;
-}
-
-.timer-right {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 8px;
-  flex-shrink: 0;
 }
 
 .timer-display {
@@ -1288,14 +1291,15 @@ button, [data-action] {
   cursor: pointer;
   color: var(--text-tertiary);
   font-size: 13px;
-  padding: 4px 6px;
-  min-width: 30px;
-  min-height: 30px;
+  padding: 0;
+  min-width: 44px;
+  min-height: 44px;
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 6px;
+  border-radius: 8px;
   flex-shrink: 0;
+  margin: -7px -7px -7px 0;
   transition: color 0.12s, background 0.12s;
 }
 .log-set-remove:active {
@@ -1593,7 +1597,9 @@ button, [data-action] {
   display: flex;
   align-items: center;
   gap: 12px;
-  white-space: nowrap;
+  white-space: normal;
+  max-width: calc(100vw - 48px);
+  text-align: center;
   box-shadow: 0 4px 20px rgba(0,0,0,0.3);
   opacity: 0;
   transition: opacity 0.2s, transform 0.2s;

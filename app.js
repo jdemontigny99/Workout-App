@@ -231,7 +231,10 @@ function pruneOldLogs() {
   const pruned = Object.fromEntries(Object.entries(logs).filter(([k]) => k >= cutoffKey));
   if (Object.keys(pruned).length !== Object.keys(logs).length) saveLogs(pruned);
 }
-function getTodayKey()  { return new Date().toISOString().split('T')[0]; }
+function getTodayKey() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
 
 function getWeightUnit() { return localStorage.getItem(KEYS.unit) || 'lbs'; }
 function setWeightUnit(u) { localStorage.setItem(KEYS.unit, u); }
@@ -323,15 +326,17 @@ function renderLogSection(workoutId, logs = loadLogs(), todayKey = getTodayKey()
 // ─── Week History ─────────────────────────────────────────────────────────────
 
 function getWeekKey(date = new Date()) {
-  const d   = new Date(date);
+  const d = new Date(date);
   const day = d.getDay();
-  return new Date(d.setDate(d.getDate() - day + (day === 0 ? -6 : 1))).toISOString().split('T')[0];
+  d.setDate(d.getDate() - day + (day === 0 ? -6 : 1));
+  // Use local date parts to avoid UTC offset flipping the day
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
 
 function getPrevWeekKey(key) {
   const d = new Date(key + 'T00:00:00');
   d.setDate(d.getDate() - 7);
-  return d.toISOString().split('T')[0];
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
 
 function loadWeekHistory() {
@@ -637,13 +642,17 @@ function exportData() {
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
   const url  = URL.createObjectURL(blob);
   const a    = Object.assign(document.createElement('a'), { href: url, download: `workout-backup-${getTodayKey()}.json` });
-  a.click(); URL.revokeObjectURL(url);
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 async function importData(file) {
   try {
     const data = JSON.parse(await file.text());
-    if (!data.days || !data.workouts) throw new Error('Not a valid Workout Tracker backup.');
+    if (!Array.isArray(data.days) || !data.workouts || typeof data.workouts !== 'object')
+      throw new Error('Not a valid Workout Tracker backup.');
     state.days = data.days; state.workouts = data.workouts;
     state.completedIDs = new Set(data.completedIDs || []);
     if (data.weekHistory) { try { localStorage.setItem(KEYS.history, JSON.stringify(data.weekHistory)); } catch {} }
@@ -1208,14 +1217,11 @@ function renderTimerCard() {
     <div class="card timer-card${timer.running?' timer-running':''}" id="timer-card">
       <div class="timer-progress-wrap"><div class="timer-progress" id="timer-progress" style="width:${pct}%"></div></div>
       <div class="timer-inner">
-        <div class="timer-left">
-          <div class="timer-label-row">
-            <span class="timer-label">REST TIMER</span>
-            ${!timer.running?`<button class="timer-collapse-btn" data-action="timer-expand" title="Minimize">${ICONS.chevronUp}</button>`:''}
-          </div>
-          <div class="timer-preset-row">${presetBtns}</div>
+        <div class="timer-header">
+          <span class="timer-label">REST TIMER</span>
+          ${!timer.running?`<button class="timer-collapse-btn" data-action="timer-expand" title="Minimize">${ICONS.chevronUp}</button>`:''}
         </div>
-        <div class="timer-right">
+        <div class="timer-main">
           <span class="timer-display" id="timer-display">${timeStr}</span>
           <div class="timer-btn-row">
             <button class="timer-start-btn" id="timer-start-btn" data-action="timer-toggle">
@@ -1224,6 +1230,7 @@ function renderTimerCard() {
             <button class="timer-reset-icon-btn" data-action="timer-reset" title="Reset">${ICONS.timerReset}</button>
           </div>
         </div>
+        <div class="timer-preset-row">${presetBtns}</div>
       </div>
     </div>`;
 }
@@ -1424,7 +1431,7 @@ function showImageViewer(dataURL) {
   viewer.id = 'img-viewer'; viewer.className = 'img-viewer';
   viewer.innerHTML = `
     <div class="img-viewer-backdrop"></div>
-    <img class="img-viewer-img" src="${dataURL}" alt="Exercise photo">
+    <img class="img-viewer-img" src="${esc(dataURL)}" alt="Exercise photo">
     <button class="img-viewer-close" aria-label="Close">✕</button>`;
   viewer.addEventListener('click', e => { if (!e.target.closest('.img-viewer-img')) viewer.remove(); });
   document.body.appendChild(viewer);
