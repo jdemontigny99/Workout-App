@@ -227,7 +227,7 @@ function pruneOldLogs() {
   const logs = loadLogs();
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - 90);
-  const cutoffKey = cutoff.toISOString().split('T')[0];
+  const cutoffKey = `${cutoff.getFullYear()}-${String(cutoff.getMonth()+1).padStart(2,'0')}-${String(cutoff.getDate()).padStart(2,'0')}`;
   const pruned = Object.fromEntries(Object.entries(logs).filter(([k]) => k >= cutoffKey));
   if (Object.keys(pruned).length !== Object.keys(logs).length) saveLogs(pruned);
 }
@@ -1648,8 +1648,14 @@ document.addEventListener('click', async e => {
       if (state.view === 'day') loadDayImages(state.currentDay); break;
 
     case 'pick-modal-image': {
+      // Capture form values before the async file picker opens — render() won't have them after the await
+      const _pmName  = document.getElementById('f-name')?.value.trim()     || '';
+      const _pmCat   = document.getElementById('f-category')?.value.trim() || '';
+      const _pmNotes = document.getElementById('f-notes')?.value.trim()    || '';
       const dataURL = await pickImage(); if (!dataURL) return;
-      pendingImg = { dataURL }; pendingImgURL = null; editImgRemoved = false; render(); break;
+      modalFormCache = { name: _pmName, category: _pmCat, notes: _pmNotes };
+      pendingImg = { dataURL }; pendingImgURL = null; editImgRemoved = false;
+      render(); modalFormCache = null; break;
     }
     case 'remove-modal-image':
       pendingImg = null; pendingImgURL = null; editCurrentImg = null; editCurrentImgURL = null;
